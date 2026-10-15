@@ -326,6 +326,39 @@ Langfuse is available only on the dev Docker Compose profile (`LANGFUSE_ENABLED=
 
 ---
 
+## Infrastructure
+
+---
+
+**[2026-10-15] Dev compose host ports: 5433 (postgres) and 6380 (redis), not 5432/6379**
+`docker-compose.dev.yml` maps postgres to host port 5433 and redis to 6380 instead of the standard 5432/6379.
+
+*Why:* Other Docker projects on the dev machine already occupy 5432 and 6379. Changing host-side ports (container-internal ports remain 5432 and 6379) avoids conflicts without affecting any inter-service communication inside the Docker network. All services that talk to postgres or redis inside Docker still use standard ports. Only `DATABASE_SYNC_URL` and `REDIS_URL` in `.env` (for tools running on the host like Alembic and seed.py) use the mapped ports.
+
+*Alternatives considered:* Stop the other projects to free ports (too disruptive, port conflicts are a permanent dev reality). Use Docker network aliases (only helps for intra-container communication, not for host-side Alembic/seed.py).
+
+---
+
+**[2026-10-15] Alembic migration files location: migrations/versions/**
+Migration files live in `infra/postgres/migrations/versions/`, not directly in `infra/postgres/migrations/`.
+
+*Why:* Alembic's default layout places the script runner (`env.py`, `script.py.mako`) in the `script_location` directory and migration version files in a `versions/` subdirectory within it. Placing migration files directly in `migrations/` and setting `version_locations = %(script_location)s` causes Alembic to try loading `env.py` as a migration file, which runs the migration engine recursively until stack overflow. The `versions/` subdirectory is the correct and unambiguous location.
+
+*Alternatives considered:* Override `version_locations` to point to `migrations/` directly (causes `env.py` to be scanned as a migration script — recursive failure). Using a separate `script_location` for the runner and migrations (unnecessarily complex).
+
+---
+
+**[2026-10-15] MLflow startup: server only, no explicit db upgrade**
+`docker-compose.dev.yml` runs `mlflow server` directly; the explicit `mlflow db upgrade` call was removed.
+
+*Why:* `mlflow server` initializes the database schema automatically on first start via its internal Alembic migrations. Adding an explicit `mlflow db upgrade` before the server runs causes a migration ordering failure on fresh databases in MLflow 2.16.x — it tries to `ALTER TABLE metrics ADD COLUMN step` before the `metrics` table exists. Removing the explicit upgrade step lets the server initialize in the correct sequence.
+
+The `mlflow` PostgreSQL database itself must still be created manually before first startup (`CREATE DATABASE mlflow`) since PostgreSQL does not auto-create databases. This is documented in the README quick start.
+
+*Alternatives considered:* Use an init container or entrypoint script to create the database before MLflow starts (adds container complexity; a one-line psql command in quick start is sufficient for dev). Pin MLflow to an older version without this bug (masks the issue; the server-only approach works correctly with the current version).
+
+---
+
 ## CI/CD
 
 ---

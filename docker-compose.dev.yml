@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -21,7 +21,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -44,17 +44,10 @@ services:
       - mlflow_artifacts:/mlflow/artifacts
     depends_on:
       postgres: { condition: service_healthy }
-    # Creates the mlflow database and starts the tracking server
-    command: >
-      bash -c "
-        pip install psycopg2-binary --quiet &&
-        mlflow db upgrade $$MLFLOW_BACKEND_STORE_URI &&
-        mlflow server
-          --backend-store-uri $$MLFLOW_BACKEND_STORE_URI
-          --default-artifact-root $$MLFLOW_DEFAULT_ARTIFACT_ROOT
-          --host 0.0.0.0
-          --port 5000
-      "
+    # mlflow server auto-initializes the database schema on first start.
+    # No separate 'mlflow db upgrade' needed — the server handles it internally.
+    command: >-
+      bash -c "pip install psycopg2-binary --quiet && mlflow server --backend-store-uri $$MLFLOW_BACKEND_STORE_URI --default-artifact-root $$MLFLOW_DEFAULT_ARTIFACT_ROOT --host 0.0.0.0 --port 5000"
     restart: unless-stopped
 
   # ── Future services (added in later weeks) ──────────────────────────────────
