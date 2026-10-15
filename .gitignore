@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Environment — never commit real values
+.env
+
+# Docker secrets — plaintext secret files for edge compose
+secrets/
+
+# Data — DVC-tracked, not git-tracked
+data/raw/*
+data/synthetic/*
+!data/raw/.gitkeep
+!data/synthetic/.gitkeep
+
+# DVC local remote store — actual dataset files, not in git
+data/dvc-store/
+
+# Models — DVC-tracked or MLflow-tracked
+models/*.pt
+models/*.onnx
+models/*.engine
+models/*.bin
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

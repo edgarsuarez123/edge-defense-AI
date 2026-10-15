@@ -1,0 +1,8 @@
+# Normalize line endings to LF in the repo, convert to CRLF on Windows checkout
+* text=auto eol=lf
+
+# Binaries — no line ending conversion
+*.engine binary
+*.onnx   binary
+*.pt     binary
+*.bin    binary

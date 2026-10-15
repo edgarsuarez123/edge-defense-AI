@@ -1,0 +1,71 @@
+services:
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.16.2
+    environment:
+      # Backend store: postgres mlflow database (separate from the operational 'edge' db)
+      MLFLOW_BACKEND_STORE_URI: postgresql+psycopg2://edge:${POSTGRES_PASSWORD}@postgres:5432/mlflow
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlflow/artifacts
+    env_file: .env
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    depends_on:
+      postgres: { condition: service_healthy }
+    # Creates the mlflow database and starts the tracking server
+    command: >
+      bash -c "
+        pip install psycopg2-binary --quiet &&
+        mlflow db upgrade $$MLFLOW_BACKEND_STORE_URI &&
+        mlflow server
+          --backend-store-uri $$MLFLOW_BACKEND_STORE_URI
+          --default-artifact-root $$MLFLOW_DEFAULT_ARTIFACT_ROOT
+          --host 0.0.0.0
+          --port 5000
+      "
+    restart: unless-stopped
+
+  # ── Future services (added in later weeks) ──────────────────────────────────
+  # vllm:      week 4 — serves Qwen2.5-7B-Instruct-AWQ
+  # api:       week 7 — FastAPI REST + SSE
+  # agents:    week 7 — LangGraph supervisor + 3 agents
+  # ui:        week 7 — React SPA
+  # sync:      week 10 — uplink monitor + GovCloud sync worker
+  # perception: week 1 — ROS 2 nodes (separate ubuntu-ros2 compose file)
+
+volumes:
+  postgres_data:
+  redis_data:
+  mlflow_artifacts:

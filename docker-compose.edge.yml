@@ -1,0 +1,175 @@
+# Edge compose — resource-constrained to simulate Jetson AGX Orin.
+# Constraints: 4 CPUs, 16GB RAM, 75% of one GPU (NVIDIA RTX class).
+# Secrets: mounted from /run/secrets/ — never pass secrets as env vars in production.
+# Usage: docker compose -f docker-compose.edge.yml up -d
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  api_key:
+    file: ./secrets/api_key.txt
+  govcloud_db_url:
+    file: ./secrets/govcloud_db_url.txt
+  govcloud_api_key:
+    file: ./secrets/govcloud_api_key.txt
+
+services:
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: edge
+      POSTGRES_DB: edge
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "edge", "-d", "edge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"        # postgres gets 1 of the 4 allocated CPUs
+          memory: 2g
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+
+  # ── Week 4: vLLM — Qwen2.5-7B-Instruct-AWQ ──────────────────────────────────
+  # Uncomment when services/vllm/ is built.
+  #
+  # vllm:
+  #   build:
+  #     context: services/vllm
+  #     dockerfile: ../../infra/docker/vllm.Dockerfile
+  #   environment:
+  #     VLLM_MODEL: Qwen/Qwen2.5-7B-Instruct-AWQ
+  #     VLLM_GPU_MEMORY_UTILIZATION: "0.75"
+  #     VLLM_MAX_MODEL_LEN: "8192"
+  #   ports:
+  #     - "8000:8000"
+  #   depends_on:
+  #     postgres: { condition: service_healthy }
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+  #     start_period: 90s     # model load time
+  #     interval: 10s
+  #     retries: 12
+  #   restart: unless-stopped
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: "2"
+  #         memory: 10g
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+
+  # ── Week 7: FastAPI — REST + SSE ─────────────────────────────────────────────
+  # Uncomment when services/api/ is built.
+  #
+  # api:
+  #   build:
+  #     context: services/api
+  #     dockerfile: ../../infra/docker/api.Dockerfile
+  #   environment:
+  #     DATABASE_URL: postgresql+asyncpg://edge@postgres:5432/edge
+  #     REDIS_URL: redis://redis:6379
+  #     ALERT_THRESHOLD: "0.55"
+  #     ESCALATION_THRESHOLD: "0.72"
+  #   secrets:
+  #     - postgres_password
+  #     - api_key
+  #   ports:
+  #     - "8080:8080"
+  #   depends_on:
+  #     postgres: { condition: service_healthy }
+  #     redis:    { condition: service_healthy }
+  #   restart: unless-stopped
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: "0.5"
+  #         memory: 512m
+
+  # ── Week 7: Agents — LangGraph supervisor + 3 agents ─────────────────────────
+  # Uncomment when services/agents/ is built.
+  # Waits for vLLM healthcheck to pass before starting — prevents startup
+  # recovery from calling an unready LLM server.
+  #
+  # agents:
+  #   build:
+  #     context: services/agents
+  #     dockerfile: ../../infra/docker/agents.Dockerfile
+  #   environment:
+  #     DATABASE_URL: postgresql+asyncpg://edge@postgres:5432/edge
+  #     REDIS_URL: redis://redis:6379
+  #     VLLM_BASE_URL: http://vllm:8000/v1
+  #   secrets:
+  #     - postgres_password
+  #   depends_on:
+  #     postgres: { condition: service_healthy }
+  #     redis:    { condition: service_healthy }
+  #     vllm:     { condition: service_healthy }
+  #   restart: unless-stopped
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: "1"
+  #         memory: 2g
+
+  # ── Week 10: Sync worker — uplink monitor + GovCloud sync ────────────────────
+  # Uncomment when services/sync/ is built.
+  #
+  # sync_worker:
+  #   build:
+  #     context: services/sync
+  #     dockerfile: ../../infra/docker/sync.Dockerfile
+  #   environment:
+  #     DATABASE_URL: postgresql+asyncpg://edge@postgres:5432/edge
+  #     UPLINK_CHECK_INTERVAL_S: "30"
+  #   secrets:
+  #     - postgres_password
+  #     - govcloud_db_url
+  #     - govcloud_api_key
+  #   depends_on:
+  #     postgres: { condition: service_healthy }
+  #   restart: unless-stopped
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: "0.5"
+  #         memory: 256m
+
+  # ── Week 1 (separate file): Perception — ROS 2 nodes ─────────────────────────
+  # ROS 2 requires an Ubuntu base image and runs in a separate compose file:
+  #   docker-compose.perception.yml
+  # Reason: ROS 2 base image conflicts with the standard Python service images.
+
+volumes:
+  postgres_data:
+  redis_data:

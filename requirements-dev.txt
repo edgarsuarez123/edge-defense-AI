@@ -1,0 +1,3 @@
+# Dev tooling — install in local venv, not in any container
+ruff==0.6.9          # linter + formatter (replaces flake8 + black)
+mypy==1.11.2         # static type checker
