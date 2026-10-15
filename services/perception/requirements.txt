@@ -1,1 +1,15 @@
-# services/perception — dependencies added in week 1
+# services/perception — data prep, training, evaluation
+
+# YOLO training and inference
+ultralytics>=8.3.0
+
+# MLflow tracking and registry
+mlflow>=2.16.0
+psycopg2-binary>=2.9.0   # MLflow PostgreSQL backend driver
+
+# Utilities
+python-dotenv>=1.0.0
+
+# Week 3 additions (deferred — ROS 2 nodes, TensorRT):
+# rclpy    — installed via ROS 2 Humble apt, not pip
+# tensorrt — installed via NVIDIA apt repo, not pip

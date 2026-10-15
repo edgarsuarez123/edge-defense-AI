@@ -359,6 +359,59 @@ The `mlflow` PostgreSQL database itself must still be created manually before fi
 
 ---
 
+## Detector Training
+
+---
+
+**[2026-10-15] YOLO model size: YOLOv8s (small), not nano or medium**
+Use YOLOv8s for both baseline evaluation and fine-tuning.
+
+*Why small over nano:* the real deployment target is TensorRT INT8 on a resource-constrained GPU (simulated Jetson). YOLOv8n at INT8 is fast but accuracy is low enough to raise false alarm rates that make the dual-threshold design meaningless. YOLOv8s at INT8 hits acceptable mAP (typically 5-8 points above nano on drone datasets) at ~60+ FPS on RTX hardware. The ~20min additional training time is not a meaningful tradeoff against deployment accuracy.
+
+*Why not medium:* at 4-bit AWQ quantization, the LLM already uses ~4GB VRAM. TensorRT INT8 for YOLOv8m would require ~2.5GB vs ~1.5GB for YOLOv8s — that's 1GB of VRAM pressure that risks OOM on 10GB GPUs during joint operation.
+
+*Alternatives considered:* YOLOv8n (fastest, but accuracy not worth the threshold calibration cost). YOLOv8m (better accuracy, unacceptable VRAM cost at full-stack deployment).
+
+---
+
+**[2026-10-15] Detector training: single-class (drone), multi-class deferred**
+The drone detector is trained with `nc=1, names=["drone"]`. Bird and aircraft classes are treated as background (hard negatives) for the initial baseline.
+
+*Why:* the baseline must answer "does fine-tuning on drone data beat COCO pretrained?" Adding multi-class complicates the mAP interpretation — a 2-class mAP of 0.72 doesn't directly compare to a 1-class mAP of 0.68. Single-class gives a clean comparison. Once the baseline and fine-tuned models are registered and the CI gate is running, expanding to multi-class is straightforward: update the class map, re-run data_prep.py, trigger the fine-tuning job.
+
+*Tradeoff:* a single-class model cannot distinguish birds from drones at detection time — that discrimination happens at the decision model layer (which fuses EO + RF + audio signals). If the decision model is not yet running, false alarm rate on birds will be higher. Acceptable for Week 2; addressed in Week 3 when the full pipeline is integrated.
+
+*Alternatives considered:* 3-class from the start (drone / bird / aircraft). Would require Drone-vs-Bird dataset to have all three classes annotated, which it doesn't. Also complicates the ablation study.
+
+---
+
+**[2026-10-15] Drone-vs-Bird source: Roboflow CC BY 4.0 version, not official challenge**
+The Roboflow-hosted Drone-vs-Bird dataset (CC BY 4.0) is used instead of the official challenge dataset which requires a Data Usage Agreement (non-commercial, restricted).
+
+*Why:* CC BY 4.0 allows unrestricted use including portfolio publishing. The DUA version is non-commercial — technically permissible for a portfolio project, but publishing the project (e.g., GitHub) with DUA-restricted data could be a licensing violation. CC BY 4.0 eliminates the ambiguity entirely. The Roboflow version is already in YOLO format, removing a conversion step.
+
+*Tradeoff:* the Roboflow version has ~2,920 images, smaller than the full official challenge dataset. This is acceptable — it contributes hard negatives to training, not the majority of positive examples.
+
+---
+
+**[2026-10-15] ROS 2 detection messages: std_msgs/String (JSON), not custom message types**
+The Week 2 stub nodes use JSON-encoded std_msgs/String for detection messages on /detections.
+
+*Why:* custom ROS 2 message types require a colcon build step every time the schema changes. During Week 2, the detection schema is still evolving. Using JSON over String allows schema iteration without rebuilds. In Week 3 when the schema is stable, migrating to a custom .msg file is a clean refactor — the topic name and node interfaces stay the same, only the serialization changes.
+
+*Alternatives considered:* custom message type from day one (correct long-term, but adds build friction during rapid iteration). geometry_msgs/BoundingBox2D (doesn't include confidence or classification fields without combining multiple message types).
+
+---
+
+**[2026-10-15] ROS 2 stack: separate docker-compose.perception.yml, not merged with dev compose**
+The ROS 2 perception stack runs in its own Docker Compose file separate from docker-compose.dev.yml.
+
+*Why:* ros:humble is based on Ubuntu 22.04 (~900MB). Other services use Python slim images (~150MB). Merging them into one compose file means all services would rebuild from the Ubuntu base, adding unnecessary image weight and build time. The separate compose file also makes it clear which services are ROS 2 nodes vs. application services, and allows the perception stack to be brought up/down independently.
+
+*Alternatives considered:* one compose file with Docker network (possible, but mixes Ubuntu and slim images with no clear boundary). Multi-stage build that installs ROS 2 into a slim base (complex, not supported well by the official ROS 2 installation path).
+
+---
+
 ## CI/CD
 
 ---

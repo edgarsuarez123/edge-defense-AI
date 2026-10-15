@@ -1,0 +1,61 @@
+# docker-compose.perception.yml
+# ROS 2 perception stack — separate from docker-compose.dev.yml
+#
+# Why separate:
+#   The ros:humble base image is Ubuntu 22.04. The other services use Python
+#   slim images. Sharing one compose file would mean all services inherit the
+#   Ubuntu base on rebuild, adding ~400MB per service unnecessarily.
+#   Keeping the ROS 2 stack in its own compose file also makes it easy to
+#   bring it up/down independently during Week 2-3 development.
+#
+# Usage:
+#   Build:   docker compose -f docker-compose.perception.yml build
+#   Pub:     docker compose -f docker-compose.perception.yml run --rm stub_publisher
+#   Sub:     docker compose -f docker-compose.perception.yml run --rm stub_subscriber
+#   Verify:  docker compose -f docker-compose.perception.yml run --rm ros2 ros2 topic list
+
+services:
+
+  stub_publisher:
+    build:
+      context: .
+      dockerfile: infra/docker/perception.Dockerfile
+    # Override the Dockerfile CMD to run the publisher node
+    command: ros2 run perception_nodes stub_publisher
+    # ROS 2 nodes communicate via DDS — they need to share a network namespace
+    # to discover each other. host network on Linux; on Docker Desktop (Mac/Win)
+    # DDS discovery is limited to within the same compose project by default.
+    network_mode: host
+    environment:
+      # ROS_DOMAIN_ID isolates this ROS 2 network from other ROS 2 instances
+      # on the same host. Use 0 (default) for dev.
+      ROS_DOMAIN_ID: 0
+    restart: unless-stopped
+
+  stub_subscriber:
+    build:
+      context: .
+      dockerfile: infra/docker/perception.Dockerfile
+    command: ros2 run perception_nodes stub_subscriber
+    network_mode: host
+    environment:
+      ROS_DOMAIN_ID: 0
+    restart: unless-stopped
+    # Subscriber doesn't need to wait for the publisher —
+    # ROS 2 topic discovery is asynchronous. The subscriber will catch
+    # messages as soon as the publisher starts.
+
+  # Helper service: run arbitrary ros2 CLI commands in the correct environment
+  # Usage: docker compose -f docker-compose.perception.yml run --rm ros2 ros2 topic list
+  ros2:
+    build:
+      context: .
+      dockerfile: infra/docker/perception.Dockerfile
+    network_mode: host
+    environment:
+      ROS_DOMAIN_ID: 0
+    entrypoint: ["/bin/bash", "-c",
+      "source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec \"$@\"",
+      "--"]
+    command: ["ros2", "--help"]
+    profiles: ["tools"]   # Only started when --profile tools is specified

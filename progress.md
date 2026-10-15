@@ -20,11 +20,56 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 - `README.md` written: problem, architecture diagram, demo scenario, tech stack table, status, quick start, repo structure
 
 ### Next
-- Week 2 Step 6: dataset research — Anti-UAV, Drone-vs-Bird, MAV-VID sourcing + `data/README.md`
-- Week 2 Step 7: `services/perception/data_prep.py` — normalize all datasets to YOLO format
-- Week 2 Step 8: YOLO baseline eval (pretrained COCO, no fine-tuning) — log to MLflow
-- Week 2 Step 9: YOLO fine-tuning on real drone data — log to MLflow, register model
-- Week 2 Step 10: ROS 2 Docker container with stub publisher/subscriber nodes
+- Week 2 Step 6: dataset research — Anti-UAV, Drone-vs-Bird, MAV-VID sourcing + `data/README.md` ✓ (see Day 2 Week 2 entry below)
+- Week 2 Step 7: `services/perception/data_prep.py` ✓
+- Week 2 Step 8: YOLO baseline + Step 9: fine-tuning — scripts written, execution deferred until datasets downloaded
+- Week 2 Step 10: ROS 2 Docker setup ✓ — Dockerfile + stub nodes written
+
+---
+
+## 2026-10-15 — Day 2 · Week 2
+
+### Done
+- **Step 6: Dataset research** — verified 4 EO-compatible datasets, documented in `data/README.md`
+  - MAV-VID: 40,232 images, already YOLO format, single-class drone
+  - DUT Anti-UAV: 10,000 images, Apache-2.0 / MIT, EO visible-light
+  - Anti-UAV300: RGB component only (~30K frames est.), Anti-UAV410/600 excluded (IR-only)
+  - Drone-vs-Bird (Roboflow CC BY 4.0): 2,920 images, cleaner license than official DUA version
+  - Anti-UAV410 / Anti-UAV600: excluded — thermal IR only, useless for an EO (camera) detector
+
+- **Step 7: Data preparation pipeline** — `services/perception/data_prep.py`
+  - Converts Anti-UAV300 JSON, DUT-Anti-UAV COCO JSON, MAV-VID YOLO, Drone-vs-Bird YOLO
+  - 80/10/10 train/val/test split with RANDOM_SEED=42 (reproducible)
+  - Generates `models/configs/yolo_data.yaml` for YOLO training
+  - Bird annotations from Drone-vs-Bird dropped; bird images retained as hard negatives
+
+- **Step 8+9: Training and eval scripts**
+  - `services/perception/train.py` — baseline (COCO pretrained eval) + finetune mode, MLflow logging, model registry registration
+  - `services/perception/eval.py` — standalone eval, FPS measurement, CI gate comparison against registered baseline
+  - Both scripts ready; actual runs deferred until datasets are downloaded
+
+- **Step 10: ROS 2 Docker setup**
+  - `infra/docker/perception.Dockerfile` — ros:humble base, colcon build of perception_nodes package
+  - `docker-compose.perception.yml` — separate compose for ROS 2 stack (Ubuntu base isolation)
+  - `services/perception/ros2_nodes/` — complete ROS 2 package: package.xml, setup.py, stub_publisher, stub_subscriber
+  - Stub publisher: publishes JSON-encoded fake detections to /detections at 1 Hz
+  - Stub subscriber: reads /detections, logs received messages
+  - Real YOLO detector replaces stub_publisher in Week 3
+
+- **5 new decision-log entries**: model size, single-class, dataset license, ROS 2 message type, separate compose
+
+### Next (Week 3)
+- Download datasets: MAV-VID (Kaggle), DUT Anti-UAV (Google Drive), Anti-UAV300 RGB, Drone-vs-Bird (Roboflow)
+- Run `data_prep.py` to produce merged YOLO dataset, DVC track the output
+- Run `train.py --mode baseline` → log to MLflow
+- Run `train.py --mode finetune` → log to MLflow, register drone-detector v1
+- Build `docker-compose.perception.yml` and verify `ros2 topic list`, `ros2 topic echo /detections`
+- TensorRT INT8 quantization of best.pt
+- Replace stub_publisher with real YOLOv8 + TensorRT inference node
+
+### Blockers
+- Datasets not yet downloaded (manual download from Google Drive, Kaggle — requires human action)
+- Kaggle CLI needs API key to automate MAV-VID download
 
 ### Blockers
 None.
