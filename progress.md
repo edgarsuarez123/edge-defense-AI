@@ -71,9 +71,6 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 - Datasets not yet downloaded (manual download from Google Drive, Kaggle — requires human action)
 - Kaggle CLI needs API key to automate MAV-VID download
 
-### Blockers
-None.
-
 ---
 
 ## 2026-10-15 — Day 1 · Week 1
