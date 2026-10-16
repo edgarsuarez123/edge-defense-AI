@@ -20,38 +20,54 @@ services:
     build:
       context: .
       dockerfile: infra/docker/perception.Dockerfile
-    # Override the Dockerfile CMD to run the publisher node
     command: ros2 run perception_nodes stub_publisher
-    # ROS 2 nodes communicate via DDS — they need to share a network namespace
-    # to discover each other. host network on Linux; on Docker Desktop (Mac/Win)
-    # DDS discovery is limited to within the same compose project by default.
-    network_mode: host
+    # ROS 2 DDS discovery works within a Docker bridge network — containers in
+    # the same compose project on the same network see each other's topics.
+    # network_mode: host is NOT used here: on Docker Desktop (Windows/Mac) it
+    # shares the Hyper-V VM network, not the actual host, which is confusing and
+    # fragile. Bridge is correct and portable. See decision-log.md.
+    networks: [ros2_net]
     environment:
-      # ROS_DOMAIN_ID isolates this ROS 2 network from other ROS 2 instances
-      # on the same host. Use 0 (default) for dev.
       ROS_DOMAIN_ID: 0
     restart: unless-stopped
+    healthcheck:
+      # CMD-SHELL uses /bin/sh which does not have 'source' — use CMD + bash -c.
+      # ros2 node list returns exit 0 when DDS daemon is reachable.
+      # grep -q stub_publisher confirms this specific node is registered.
+      # start_period: DDS takes ~5-10s to register nodes; prevents Docker from
+      # restarting a healthy container that hasn't registered yet.
+      test: ["CMD", "/bin/bash", "-c", "source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && ros2 node list | grep -q stub_publisher"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   stub_subscriber:
     build:
       context: .
       dockerfile: infra/docker/perception.Dockerfile
     command: ros2 run perception_nodes stub_subscriber
-    network_mode: host
+    networks: [ros2_net]
     environment:
       ROS_DOMAIN_ID: 0
     restart: unless-stopped
     # Subscriber doesn't need to wait for the publisher —
     # ROS 2 topic discovery is asynchronous. The subscriber will catch
     # messages as soon as the publisher starts.
+    healthcheck:
+      test: ["CMD", "/bin/bash", "-c", "source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && ros2 node list | grep -q stub_subscriber"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # Helper service: run arbitrary ros2 CLI commands in the correct environment
-  # Usage: docker compose -f docker-compose.perception.yml run --rm ros2 ros2 topic list
+  # Usage: docker compose -f docker-compose.perception.yml run --rm --profile tools ros2 ros2 topic list
   ros2:
     build:
       context: .
       dockerfile: infra/docker/perception.Dockerfile
-    network_mode: host
+    networks: [ros2_net]
     environment:
       ROS_DOMAIN_ID: 0
     entrypoint: ["/bin/bash", "-c",
@@ -59,3 +75,11 @@ services:
       "--"]
     command: ["ros2", "--help"]
     profiles: ["tools"]   # Only started when --profile tools is specified
+
+networks:
+  ros2_net:
+    driver: bridge
+    # FUTURE (Week 3): When redis_bridge_node needs to reach Redis in the dev
+    # stack, create an external shared network:
+    #   docker network create edge_shared
+    # Then add edge_shared as an external network in both compose files.

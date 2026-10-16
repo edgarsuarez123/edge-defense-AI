@@ -4,6 +4,36 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 
 ---
 
+## 2026-10-16 — Week 3 · ROS 2 Docker Stack Verified
+
+### Done
+- **6 issues found and fixed** in the Week 2 ROS 2 scaffold:
+  - `setup.py`: removed extra whitespace in console_scripts entry points
+  - `perception.Dockerfile`: removed ultralytics + mlflow pip install (saves ~500MB, those packages are never used inside the image)
+  - `docker-compose.perception.yml`: replaced `network_mode: host` with named `ros2_net` bridge network (host mode doesn't work correctly on Docker Desktop/Windows)
+  - `docker-compose.perception.yml`: added healthchecks to stub_publisher and stub_subscriber using `ros2 node list | grep -q <node>`
+  - Healthcheck bug: `CMD-SHELL` uses `/bin/sh` which has no `source` — fixed to `CMD + /bin/bash -c`
+  - Healthcheck timeout bumped to 10s and start_period to 20s (DDS registration takes ~5-10s)
+- **Build verified**: `docker compose -f docker-compose.perception.yml build` — clean, no pip bloat
+- **Pub/sub verified**: stub_publisher and stub_subscriber exchanged messages at 1 Hz with zero dropped frames, cycling BENIGN → UNKNOWN → LIKELY_THREAT
+- **Topic verified**: `ros2 topic list` shows `/detections` via tools service
+- **Health verified**: both services report `healthy` after 35s
+- **2 new decision-log entries**: ROS 2 image slimming, bridge network over host mode
+
+### Next (Week 3 continued)
+- Download remaining datasets (Anti-UAV300 RGB, Drone-vs-Bird from Roboflow)
+- Run `data_prep.py` once datasets are ready
+- Run `train.py --mode baseline` → log to MLflow
+- Run `train.py --mode finetune` → register drone-detector v1
+- TensorRT INT8 quantization of best.pt
+- Replace stub_publisher with real YOLOv8 + TensorRT inference node (subscribes to `/camera/image_raw`)
+
+### Blockers
+- MAV-VID unavailable on Kaggle; Bitbucket clone fails (pack corruption). Proceeding without it — DUT Anti-UAV + Anti-UAV300 + Drone-vs-Bird (~43K images) is sufficient.
+- Anti-UAV300 and Drone-vs-Bird not yet downloaded.
+
+---
+
 ## 2026-10-15 — Day 2 · Week 1 Close-Out
 
 ### Done

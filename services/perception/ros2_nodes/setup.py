@@ -20,8 +20,8 @@ setup(
     entry_points={
         "console_scripts": [
             # Week 2 stubs — replaced by real detector nodes in Week 3
-            "stub_publisher  = perception_nodes.stub_publisher:main",
-            "stub_subscriber = perception_nodes.stub_subscriber:main",
+            "stub_publisher=perception_nodes.stub_publisher:main",
+            "stub_subscriber=perception_nodes.stub_subscriber:main",
         ],
     },
 )

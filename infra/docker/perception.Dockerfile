@@ -10,7 +10,6 @@
 # What this image contains:
 #   - ROS 2 Humble desktop-minimal (rclpy, common message types, no GUI)
 #   - Python 3.10 (ships with Ubuntu 22.04)
-#   - pip packages for YOLO inference and Redis bridge
 #   - The perception_nodes ROS 2 package
 
 FROM ros:humble
@@ -24,10 +23,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-sensor-msgs \
     && rm -rf /var/lib/apt/lists/*
 
-# Python packages: YOLO (week 2 stubs, real inference in week 3)
-# redis-py: bridge node publishes to Redis stream
-COPY services/perception/requirements.txt /tmp/requirements.txt
-RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+# No pip packages needed for stub nodes — rclpy and std_msgs come from apt above.
+# STUB: When redis_bridge_node is added (Week 3), create ros2_nodes/requirements.txt
+# containing redis>=5.0.0 and add:
+#   COPY services/perception/ros2_nodes/requirements.txt /tmp/ros2_requirements.txt
+#   RUN pip3 install --no-cache-dir -r /tmp/ros2_requirements.txt
+# Keep services/perception/requirements.txt separate — it's for host-side training scripts.
 
 # Copy the ROS 2 package source
 COPY services/perception/ros2_nodes /ros2_ws/src/perception_nodes

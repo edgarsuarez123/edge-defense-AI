@@ -412,6 +412,20 @@ The ROS 2 perception stack runs in its own Docker Compose file separate from doc
 
 ---
 
+**[2026-10-16] ROS 2 Docker image: no pip packages for stub nodes**
+Remove `ultralytics` and `mlflow` from the ROS 2 Dockerfile. Stub nodes use only `rclpy` and `std_msgs`, both installed via apt. Training scripts (`train.py`, `eval.py`, `data_prep.py`) run on the host — they are never copied into the Docker image. Saves ~500MB image size and ~2-3 min build time. When `redis_bridge_node` is added (Week 3), a separate `ros2_nodes/requirements.txt` containing only `redis>=5.0.0` will be created and installed in the Dockerfile.
+
+*Alternatives considered:* Keep the existing pip install block (wastes ~500MB for packages never used inside the container). Create a separate slim `ros2_nodes/requirements.txt` now with only `redis` (premature — redis is not needed until the bridge node is built).
+
+---
+
+**[2026-10-16] ROS 2 networking: named bridge network, not host mode**
+Replace `network_mode: host` with a named `ros2_net` Docker bridge network in `docker-compose.perception.yml`. DDS multicast discovery works within a Docker bridge network — containers in the same compose project on the same L2 segment discover each other's topics without host networking. `network_mode: host` on Docker Desktop (Windows/Mac) shares the Hyper-V VM's network namespace, not the actual Windows host network, which behaves differently than documented and is misleading during development. The named network is portable and explicit. On bare-metal Linux deployment, either approach works.
+
+*Alternatives considered:* Keep `network_mode: host` with a Windows caveat comment (works on Linux, misleading on Docker Desktop — the wrong behaviour is silent). Use Cyclone DDS with `ROS_DISCOVERY_SERVER` instead of multicast (unnecessary complexity for a single-host compose stack).
+
+---
+
 ## CI/CD
 
 ---
