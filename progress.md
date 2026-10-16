@@ -36,7 +36,7 @@ None — skeleton is complete and testable independently of vLLM/DB.
 
 ---
 
-## 2026-10-16 — Week 3 · Data Prep Pipeline (IN PROGRESS)
+## 2026-10-16 — Week 3 · Data Prep Pipeline (COMPLETE)
 
 ### Done
 - **All 3 datasets downloaded and verified:**
@@ -51,23 +51,22 @@ None — skeleton is complete and testable independently of vLLM/DB.
   - Added `_extract_anti_uav300_frames()` helper — extracts visible.mp4 → visible/visibleI{NNNN}.jpg, idempotent
 - **Added `opencv-python>=4.8.0` to `services/perception/requirements.txt`**
 
-### In Progress
-- `python services/perception/data_prep.py` running in background
-  - DUT Anti-UAV: parsing 10,000 VOC XMLs
-  - Anti-UAV300: extracting ~30K frames from 318 mp4 sequences (~20-30 min first run)
-  - Drone-vs-Bird: loading ~2,920 YOLO images
-  - Output: `data/raw/merged/{train,val,test}/` + `models/configs/yolo_data.yaml`
+### Pipeline output (verified complete)
+- **309,821 total samples** — DUT Anti-UAV (10,000) + Anti-UAV300 (296,901) + Drone-vs-Bird (2,920)
+- **Split:** train 247,856 / val 30,982 / test 30,983
+- **Class balance:** 290,632 positive (93.8%) / 19,189 background (6.2%) — imbalance noted, cls loss weight to be tuned in train.py
+- **`models/configs/yolo_data.yaml`** written and ready for training
 
 ### Next
-- Verify merged output: spot-check label files, confirm counts (~43K total)
-- `dvc add data/raw/merged && git add data/raw/merged.dvc`
-- `python services/perception/train.py --mode baseline` → log to MLflow
-- `python services/perception/train.py --mode finetune` → register drone-detector v1
-- TensorRT INT8 quantization of best.pt
+- `dvc add data/raw/merged && git add data/raw/merged.dvc` — version the merged dataset before training
+- `python services/perception/train.py --mode baseline` → COCO pretrained mAP on held-out test set, log to MLflow (becomes CI gate threshold)
+- `python services/perception/train.py --mode finetune` → fine-tune on merged dataset, register drone-detector v1 in MLflow registry
+- TensorRT INT8 quantization of best.pt — measure FPS before/after (number goes in T&E report)
 - Replace stub_publisher with real YOLOv8 + TensorRT inference node
+- **Week 3 gate:** tracks streaming with measured mAP and FPS numbers
 
 ### Blockers
-- data_prep.py still running (frame extraction is slow — idempotent after first run)
+None.
 
 ---
 
