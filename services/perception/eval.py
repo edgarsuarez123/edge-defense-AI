@@ -113,38 +113,60 @@ def evaluate(
 
 def _measure_fps(model: YOLO, data_yaml: Path, split: str) -> float:
     """
-    Measure inference FPS: warm up, then time a fixed number of batches.
+    Measure inference FPS on a fixed 100-image sample from the split.
 
-    Why warmup batches:
-        The first inference pass has GPU kernel compilation overhead (CUDA JIT).
-        Warmup saturates the pipeline; subsequent passes reflect true throughput.
-        This matters more for TensorRT than PyTorch, but it's correct to do it here.
+    Why predict() on a sample instead of val() on the full set:
+        model.val() runs the complete validation loop (loss computation, metric
+        accumulation, NMS post-processing) on all 31K val images. Calling it 13
+        times for warmup + measurement would process ~400K images unnecessarily.
+        model.predict() is pure inference — no loss, no metric tracking — and is
+        what actually runs at deployment time. FPS measured on predict() is the
+        number that goes in the T&E report.
 
-    Returns: FPS as images per second (batch_size * batches / elapsed).
+    Why 100 images:
+        Enough to amortize Python overhead and get a stable GPU throughput reading.
+        The full val set takes minutes per pass; 100 images takes ~2 seconds.
+
+    Why warmup passes:
+        The first inference pass has CUDA JIT kernel compilation overhead.
+        Warmup saturates the pipeline; measurement passes reflect true throughput.
+
+    Returns: FPS as images per second (images * passes / elapsed).
     """
     import torch
+    import yaml
 
-    # Run warmup passes (results discarded)
+    # Resolve the image directory from the data yaml
+    with open(data_yaml) as f:
+        data_cfg = yaml.safe_load(f)
+    dataset_root = Path(data_cfg["path"])
+    img_dir = dataset_root / data_cfg[split]
+
+    # Collect a fixed sample of 100 images for FPS measurement
+    img_extensions = {".jpg", ".jpeg", ".png", ".bmp"}
+    all_images = [p for p in img_dir.iterdir() if p.suffix.lower() in img_extensions]
+    sample = sorted(all_images)[:100]   # sorted for reproducibility
+    sample_paths = [str(p) for p in sample]
+
+    if not sample_paths:
+        return 0.0
+
+    # Warmup passes — results discarded
     for _ in range(FPS_WARMUP_BATCHES):
-        model.val(data=str(data_yaml), split=split, verbose=False)
+        model.predict(sample_paths, verbose=False)
 
-    # Time the measurement passes
+    # Measurement passes
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(FPS_MEASURE_BATCHES):
-        model.val(data=str(data_yaml), split=split, verbose=False)
+        model.predict(sample_paths, verbose=False)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     elapsed = time.perf_counter() - t0
 
-    # STUB: val() doesn't expose per-image count easily.
-    # FPS = images_in_val_set * FPS_MEASURE_BATCHES / elapsed
-    # Real implementation: count images from data_yaml paths.
-    # For now: approximate from elapsed / batch count.
-    # Replace when dataset is downloaded and image count is known.
-    approx_fps = FPS_MEASURE_BATCHES / elapsed * 16  # assumes batch=16
-    return approx_fps
+    fps = (len(sample_paths) * FPS_MEASURE_BATCHES) / elapsed
+    return fps
 
 
 def _check_baseline(candidate_metrics: dict[str, float], candidate_run_id: str) -> bool:

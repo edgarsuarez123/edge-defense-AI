@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 .venv/
+.venv-training/
 venv/
 *.egg-info/
 
@@ -26,6 +27,14 @@ models/*.pt
 models/*.onnx
 models/*.engine
 models/*.bin
+
+# YOLO training runs — logged to MLflow, not git
+runs/
+
+# Downloaded YOLO base weights — fetched automatically by ultralytics
+yolov8s.pt
+yolov8n.pt
+yolov8m.pt
 
 # Editor
 .vscode/

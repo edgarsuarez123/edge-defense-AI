@@ -31,8 +31,15 @@ import os
 import random
 import shutil
 import argparse
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from dataclasses import dataclass, field
+
+try:
+    import cv2
+    _CV2_AVAILABLE = True
+except ImportError:
+    _CV2_AVAILABLE = False
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -88,122 +95,176 @@ def load_mav_vid(dataset_dir: Path) -> list[AnnotatedSample]:
 def load_dut_anti_uav(dataset_dir: Path) -> list[AnnotatedSample]:
     """
     DUT Anti-UAV detection subset.
-    Expected structure: images/ + annotations/instances_{split}.json (COCO format).
+    Actual structure (confirmed on download):
+        {split}/img/*.jpg   — images
+        {split}/xml/*.xml   — Pascal VOC XML annotations, one per image
 
-    COCO bounding boxes are [x_min, y_min, width, height] in pixel coordinates.
-    YOLO format requires [cx, cy, w, h] normalized by image dimensions.
+    NOTE: Original data/README.md assumed COCO JSON — that was wrong.
+    The actual format is Pascal VOC XML with image dimensions embedded in <size>.
 
-    We load all splits (train/val/test) and re-split ourselves for consistent
-    proportions across the merged dataset.
+    VOC bounding boxes are [xmin, ymin, xmax, ymax] in pixel coordinates.
+    Conversion to YOLO: cx = (xmin+xmax)/2 / img_w, cy = (ymin+ymax)/2 / img_h,
+    w = (xmax-xmin) / img_w, h = (ymax-ymin) / img_h.
+
+    We load all splits and re-split ourselves for consistent proportions
+    across the merged dataset (same approach as other loaders).
     """
     samples = []
 
-    # DUT provides separate JSON per split — load all
     for split_name in ["train", "val", "test"]:
-        ann_file = dataset_dir / "annotations" / f"instances_{split_name}.json"
-        if not ann_file.exists():
+        img_dir = dataset_dir / split_name / "img"
+        xml_dir = dataset_dir / split_name / "xml"
+        if not img_dir.exists():
             continue
 
-        with open(ann_file) as f:
-            coco = json.load(f)
-
-        # Build lookup: image_id -> image metadata
-        id_to_image = {img["id"]: img for img in coco["images"]}
-
-        # Group annotations by image_id
-        from collections import defaultdict
-        anns_by_image: dict = defaultdict(list)
-        for ann in coco["annotations"]:
-            anns_by_image[ann["image_id"]].append(ann)
-
-        for img_meta in coco["images"]:
-            img_id = img_meta["id"]
-            img_w = img_meta["width"]
-            img_h = img_meta["height"]
-            img_path = dataset_dir / split_name / "images" / img_meta["file_name"]
-
-            if not img_path.exists():
+        for img_path in sorted(img_dir.glob("*.jpg")):
+            xml_path = xml_dir / img_path.with_suffix(".xml").name
+            if not xml_path.exists():
+                # Missing annotation — skip rather than silently mislabel
                 continue
 
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+
+            # Image dimensions are embedded in the XML — no need to open the image
+            size = root.find("size")
+            img_w = int(size.find("width").text)
+            img_h = int(size.find("height").text)
+
             boxes = []
-            for ann in anns_by_image[img_id]:
-                x_min, y_min, w_px, h_px = ann["bbox"]
-                # COCO -> YOLO: pixel absolute -> normalized center
-                cx = (x_min + w_px / 2) / img_w
-                cy = (y_min + h_px / 2) / img_h
-                w = w_px / img_w
-                h = h_px / img_h
+            for obj in root.findall("object"):
+                bbox = obj.find("bndbox")
+                xmin = int(bbox.find("xmin").text)
+                ymin = int(bbox.find("ymin").text)
+                xmax = int(bbox.find("xmax").text)
+                ymax = int(bbox.find("ymax").text)
+                # VOC (absolute corners) -> YOLO (normalized center)
+                cx = ((xmin + xmax) / 2) / img_w
+                cy = ((ymin + ymax) / 2) / img_h
+                w  = (xmax - xmin) / img_w
+                h  = (ymax - ymin) / img_h
                 boxes.append((DRONE_CLASS_ID, cx, cy, w, h))
 
+            # If no <object> elements: hard negative (empty boxes list is valid)
             samples.append(AnnotatedSample(image_path=img_path, boxes=boxes))
 
     print(f"[dut-anti-uav] Loaded {len(samples)} samples")
     return samples
 
 
+def _extract_anti_uav300_frames(seq_dir: Path) -> Path:
+    """
+    Extract visible.mp4 → visible/visibleI{NNNN}.jpg for one sequence.
+    Returns the path to the frames directory.
+
+    Naming convention matches the bundled framecut.py: visibleI0000.jpg, visibleI0001.jpg, ...
+    Idempotent: if visible/ already contains .jpg files, extraction is skipped.
+
+    Why here and not in framecut.py:
+        framecut.py hardcodes './datasets/Anti-UAV-RGBT' which doesn't match our layout.
+        data_prep.py is the single conversion boundary — all raw → YOLO conversion
+        happens here, including frame extraction. See decision-log.md.
+    """
+    frames_dir = seq_dir / "visible"
+    if frames_dir.exists() and any(frames_dir.glob("*.jpg")):
+        return frames_dir  # Already extracted — skip
+
+    video_path = seq_dir / "visible.mp4"
+    frames_dir.mkdir(exist_ok=True)
+
+    cap = cv2.VideoCapture(str(video_path))
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        out_path = frames_dir / f"visibleI{frame_idx:04d}.jpg"
+        cv2.imwrite(str(out_path), frame)
+        frame_idx += 1
+    cap.release()
+    return frames_dir
+
+
 def load_anti_uav300_rgb(dataset_dir: Path) -> list[AnnotatedSample]:
     """
-    Anti-UAV300 — RGB sequences only.
-    Each sequence is a directory containing:
-        - frames as JPEG files (001.jpg, 002.jpg, ...)
-        - RGB_label.json with per-frame annotations
+    Anti-UAV300 RGB sequences.
+    Actual structure (confirmed on download):
+        anti-uav300/Anti-UAV-RGBT/{train,val,test}/{sequence_name}/
+            visible.json   — {"exist": [1,1,0,...], "gt_rect": [[x,y,w,h],...]}
+            visible.mp4    — frames extracted to visible/visibleI{NNNN}.jpg
 
-    JSON structure per frame:
-        {"exist": 0 or 1, "get_rect": [x1, y1, x2, y2]}
-    where x1,y1 is top-left and x2,y2 is bottom-right in pixel coordinates.
+    NOTE: Original code was wrong on multiple counts:
+        - File was "RGB_label.json", actual is "visible.json"
+        - exist/gt_rect are top-level parallel lists, not per-frame dicts
+        - bbox format is [x, y, w, h] (top-left + size), not [x1, y1, x2, y2]
+        - Frames must be extracted from .mp4 first (done by _extract_anti_uav300_frames)
 
-    Frames where exist=0 are kept as hard negatives (empty boxes list).
-    Frames where exist=1 but get_rect is None/empty are skipped.
+    Requires cv2 for frame extraction. Skipped entirely if cv2 is unavailable.
     """
+    if not _CV2_AVAILABLE:
+        print("[anti-uav300] SKIP — cv2 not installed. Run: pip install opencv-python")
+        return []
+
     samples = []
+    rgbt_dir = dataset_dir / "Anti-UAV-RGBT"
 
-    # Each subdirectory is one sequence
-    for seq_dir in sorted(dataset_dir.iterdir()):
-        if not seq_dir.is_dir():
+    for split_name in ["train", "val", "test"]:
+        split_dir = rgbt_dir / split_name
+        if not split_dir.exists():
             continue
 
-        label_file = seq_dir / "RGB_label.json"
-        if not label_file.exists():
-            continue  # IR-only sequence — skip
+        seq_dirs = sorted(d for d in split_dir.iterdir() if d.is_dir())
+        print(f"  [anti-uav300/{split_name}] {len(seq_dirs)} sequences — extracting frames...")
 
-        with open(label_file) as f:
-            labels = json.load(f)
+        for seq_dir in seq_dirs:
+            json_file = seq_dir / "visible.json"
+            video_file = seq_dir / "visible.mp4"
+            if not json_file.exists() or not video_file.exists():
+                continue  # IR-only or incomplete sequence — skip
 
-        # labels is a list of {exist, get_rect} dicts, one per frame
-        frame_files = sorted(seq_dir.glob("*.jpg"))
-        if len(frame_files) != len(labels):
-            # Frame count mismatch — skip sequence rather than misalign
-            print(f"  [anti-uav300] Skipping {seq_dir.name}: "
-                  f"{len(frame_files)} frames vs {len(labels)} labels")
-            continue
+            # Extract mp4 → jpg frames (idempotent: skips if already done)
+            frames_dir = _extract_anti_uav300_frames(seq_dir)
 
-        for frame_path, label in zip(frame_files, labels):
-            exist = label.get("exist", 0)
-            rect = label.get("get_rect")
+            with open(json_file) as f:
+                labels = json.load(f)
 
-            if not exist:
-                # Hard negative — include image, no boxes
-                samples.append(AnnotatedSample(image_path=frame_path, boxes=[]))
+            # exist and gt_rect are parallel lists: one entry per frame
+            exist_list = labels["exist"]
+            gt_rect_list = labels["gt_rect"]
+
+            frame_files = sorted(frames_dir.glob("*.jpg"))
+            if len(frame_files) != len(exist_list):
+                print(f"  [anti-uav300] Skipping {seq_dir.name}: "
+                      f"{len(frame_files)} frames vs {len(exist_list)} labels")
                 continue
 
-            if not rect or len(rect) != 4:
-                continue  # Malformed annotation — skip frame
+            # Read image dimensions from first frame (once per sequence, not per frame)
+            first = cv2.imread(str(frame_files[0]))
+            if first is None:
+                continue
+            img_h, img_w = first.shape[:2]
 
-            x1, y1, x2, y2 = rect
-            # Need image dimensions to normalize.
-            # Reading image dimensions here would require PIL/cv2 for every frame —
-            # too slow at scale. Anti-UAV300 is Full HD: hardcode 1920x1080.
-            # STUB: replace with dynamic size read if sequences use other resolutions.
-            img_w, img_h = 1920, 1080
+            for frame_path, exist, rect in zip(frame_files, exist_list, gt_rect_list):
+                if not exist:
+                    # exist=0: drone not visible — hard negative
+                    samples.append(AnnotatedSample(image_path=frame_path, boxes=[]))
+                    continue
 
-            cx = ((x1 + x2) / 2) / img_w
-            cy = ((y1 + y2) / 2) / img_h
-            w = (x2 - x1) / img_w
-            h = (y2 - y1) / img_h
-            samples.append(AnnotatedSample(
-                image_path=frame_path,
-                boxes=[(DRONE_CLASS_ID, cx, cy, w, h)]
-            ))
+                x, y, w_px, h_px = rect   # top-left x,y + pixel width,height
+                if w_px <= 0 or h_px <= 0:
+                    # Degenerate bbox (occasionally present) — treat as negative
+                    samples.append(AnnotatedSample(image_path=frame_path, boxes=[]))
+                    continue
+
+                # [x, y, w, h] top-left -> YOLO [cx, cy, w, h] normalized
+                cx = (x + w_px / 2) / img_w
+                cy = (y + h_px / 2) / img_h
+                nw = w_px / img_w
+                nh = h_px / img_h
+                samples.append(AnnotatedSample(
+                    image_path=frame_path,
+                    boxes=[(DRONE_CLASS_ID, cx, cy, nw, nh)]
+                ))
 
     print(f"[anti-uav300] Loaded {len(samples)} samples")
     return samples
@@ -211,20 +272,24 @@ def load_anti_uav300_rgb(dataset_dir: Path) -> list[AnnotatedSample]:
 
 def load_drone_vs_bird(dataset_dir: Path) -> list[AnnotatedSample]:
     """
-    Drone-vs-Bird (Roboflow export, YOLO format).
-    Structure: images/{train,val,test}/ + labels/{train,val,test}/
+    Drone-vs-Bird (Roboflow YOLOv8 export).
+    Actual structure (confirmed on download):
+        {split}/images/*.jpg
+        {split}/labels/*.txt
+    where split is 'train', 'valid', or 'test'.
 
-    This dataset has two classes: drone (0) and bird (1).
-    Bird annotations are dropped — bird images are retained as hard negatives.
+    NOTE: Original code had this inverted as images/{split}/ — wrong.
+    The Roboflow YOLOv8 export puts the split name first.
 
-    Why keep bird images as negatives: the model must learn that birds are not drones.
-    Simply dropping all bird images would remove hard negative signal.
+    Two classes in source: drone (0) and bird (1).
+    Bird annotations are dropped; bird images are kept as hard negatives.
+    Why: the model must learn that birds are not drones.
     """
     samples = []
 
     for split in ["train", "valid", "val", "test"]:
-        images_dir = dataset_dir / "images" / split
-        labels_dir = dataset_dir / "labels" / split
+        images_dir = dataset_dir / split / "images"
+        labels_dir = dataset_dir / split / "labels"
         if not images_dir.exists():
             continue
 
@@ -374,11 +439,17 @@ def main():
     all_samples: list[AnnotatedSample] = []
 
     # Load each dataset. Skip gracefully if not yet downloaded.
+    # Drone-vs-Bird: Roboflow exports into a versioned subdirectory
+    # (e.g. drone-vs-bird.v2i.yolov8/). Auto-detect it instead of hardcoding.
+    dvb_root = args.raw_dir / "drone-vs-bird"
+    dvb_subdirs = [d for d in dvb_root.glob("*.yolov8") if d.is_dir()] if dvb_root.exists() else []
+    dvb_dir = dvb_subdirs[0] if dvb_subdirs else dvb_root  # fallback to root if no subdir found
+
     loaders = [
-        (args.raw_dir / "mav-vid",       load_mav_vid),
-        (args.raw_dir / "dut-anti-uav",  load_dut_anti_uav),
-        (args.raw_dir / "anti-uav300",   load_anti_uav300_rgb),
-        (args.raw_dir / "drone-vs-bird", load_drone_vs_bird),
+        (args.raw_dir / "mav-vid",      load_mav_vid),
+        (args.raw_dir / "dut-anti-uav", load_dut_anti_uav),
+        (args.raw_dir / "anti-uav300",  load_anti_uav300_rgb),
+        (dvb_dir,                        load_drone_vs_bird),
     ]
 
     for dataset_dir, loader_fn in loaders:
