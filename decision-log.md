@@ -429,6 +429,63 @@ The Roboflow-hosted Drone-vs-Bird dataset (CC BY 4.0) is used instead of the off
 
 ---
 
+**[2026-10-16] Dataset split: 80/10/10 train/val/test with RANDOM_SEED=42**
+`data_prep.py` splits the merged dataset 80% train, 10% val, 10% test. The random seed is a fixed constant (42) set at the top of the file.
+
+*Why 80/10/10:* standard split for object detection benchmarks. The val set is used by YOLO during training to select the best checkpoint (early stopping). The test set is held out entirely — it is only touched by `eval.py` for the final mAP measurement and CI gate comparison. Using val for both early stopping and final eval (a common mistake) would overfit the checkpoint selection to val and report optimistic test metrics.
+
+*Why RANDOM_SEED=42:* reproducibility. Every run of `data_prep.py` produces the same split. The CI gate compares a new model's mAP against the registered baseline — if the splits were random, a metric regression could be caused by bad luck in split assignment, not by a real model change. Fixed seed eliminates this confounder.
+
+*Alternatives considered:* 70/15/15 (more evaluation data, but 309K samples means val/test sets are already large enough at 10%). No fixed seed (non-reproducible splits — wrong for a system with a CI eval gate).
+
+---
+
+**[2026-10-16] Anti-UAV300 loaded by extracting frames from mp4, not pre-extracted images**
+`load_anti_uav300_rgb()` in `data_prep.py` extracts frames from `visible.mp4` per sequence using OpenCV (`cv2.VideoCapture`), rather than loading pre-extracted JPEGs.
+
+*Why:* the Anti-UAV300 download provides mp4 sequences with a `visible.json` annotation file per sequence. There are no pre-extracted frames in the download. Extracting with `cv2.VideoCapture` is idempotent — if frames already exist on disk (from a previous run), the loader skips extraction. First run: ~20-30 minutes for 318 sequences. Subsequent runs: seconds.
+
+*Tradeoff:* requires `opencv-python` as a dependency (added to `services/perception/requirements.txt`). This is the only data prep dependency that is not stdlib. The alternative — using ffmpeg via subprocess — avoids the Python package dependency but adds an OS-level dependency that must be documented and present in any environment that runs `data_prep.py`.
+
+*Alternatives considered:* ffmpeg subprocess (no Python package dep, but requires ffmpeg installed on host — harder to document). Pre-extract manually before running data_prep.py (manual step that breaks the reproducible pipeline).
+
+---
+
+**[2026-10-16] Bird annotations dropped from Drone-vs-Bird, images retained as hard negatives**
+In `load_drone_vs_bird()`, annotation rows where `class_id != 0` (i.e., bird annotations) are filtered out. The images are retained in the dataset.
+
+*Why drop bird annotations:* the detector is single-class (drone only, `nc=1`). YOLO ignores label files that reference class IDs beyond `nc`. Keeping bird annotations would cause YOLO to emit a warning on every batch and could confuse the loss calculation. Dropping them is the correct single-class treatment.
+
+*Why keep the images:* bird images without any drone present become background frames (no label file = no positive object). These are **hard negatives** — visually similar to drone-present frames (outdoor, similar lighting, moving objects) but without the target. Training on hard negatives explicitly teaches the model that "bird in frame" should not produce a drone detection. Discarding these images entirely would reduce the precision of the final model.
+
+*Alternatives considered:* Drop images with only bird annotations (loses hard negatives — precision degrades). Keep bird as a second class (requires multi-class training, contradicts the single-class decision). Relabel birds as drones (incorrect ground truth — would hurt precision on real drone detections).
+
+---
+
+**[2026-10-16] Class imbalance: 93.8% positive rate — no resampling, monitor cls_loss weight**
+The merged dataset has 290,632 drone-present samples and 19,189 background samples (93.8% positive). No resampling or oversampling is applied in `data_prep.py`.
+
+*Why no resampling in data_prep.py:* YOLO handles class imbalance during training via the `cls` loss weight parameter, not via dataset resampling. Resampling in the data pipeline (e.g., duplicating background frames) would create artificial correlations between samples in the same split, and any oversampled frames that appear in both train and val sets would invalidate the validation mAP. The correct place to address imbalance is in the training config.
+
+*Action for train.py:* the `cls` hyperparameter in the YOLO training config controls how much weight is applied to the classification loss vs. the box regression loss. A high positive rate means the model can achieve low loss by predicting "drone" everywhere — `cls` must be tuned to penalize false positives. This will be addressed when running `train.py --mode finetune`.
+
+*Tradeoff:* not resampling means the training loop will see far more positive examples than negatives per epoch. This is generally acceptable for object detection (vs. image classification) because YOLO's loss function already handles positive/negative anchor assignment internally. The risk is degraded precision on true negatives — worth monitoring in eval metrics.
+
+*Alternatives considered:* Undersample positives to 1:1 ratio (loses 270K samples — wasteful and unnecessary for YOLO). Oversample negatives (duplicates and data leakage risk). Use weighted sampler in DataLoader (YOLO's Ultralytics trainer does not expose a custom sampler without patching).
+
+---
+
+**[2026-10-16] MAV-VID excluded: Kaggle source corrupted, Bitbucket clone fails**
+MAV-VID (40,232 images, originally planned as the largest dataset source) is excluded from training.
+
+*Why:* The Kaggle download was removed. The official Bitbucket clone (`git clone https://bitbucket.org/VisDrone/mav-vid`) fails with pack corruption (object pack hash mismatch). No verified mirror was found. With 309,821 samples from the remaining three datasets, MAV-VID is not required to achieve sufficient training data volume for YOLOv8s.
+
+*Impact:* the missing 40K samples represent about 11% of the originally planned dataset size. DUT Anti-UAV (10K) + Anti-UAV300 (296K) + Drone-vs-Bird (2.9K) provides more than enough positive examples. Anti-UAV300's 296K frames are the dominant contributor.
+
+*Alternatives considered:* Wait for MAV-VID to become available (indefinite blocker — Kaggle removal is permanent). Find a third-party mirror (not found; using unverified data for a defense system is inappropriate). Proceed without it (chosen — documented in progress.md and data/README.md).
+
+---
+
 **[2026-10-15] ROS 2 detection messages: std_msgs/String (JSON), not custom message types**
 The Week 2 stub nodes use JSON-encoded std_msgs/String for detection messages on /detections.
 
