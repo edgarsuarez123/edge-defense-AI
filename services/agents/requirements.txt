@@ -1,1 +1,12 @@
-# services/agents — dependencies added in week 7
+# services/agents — LangGraph agent mesh dependencies
+# Week 3: skeleton + stubs (all external calls are stubbed, no vLLM or DB required yet)
+# Week 6: uncomment or add: langgraph-checkpoint-postgres, psycopg2/asyncpg for real DB writes
+
+langgraph>=0.2.0
+langgraph-checkpoint-postgres>=2.0.0
+langchain-openai>=0.2.0
+langchain-core>=0.3.0
+sqlalchemy[asyncio]>=2.0.0
+asyncpg>=0.29.0
+redis>=5.0.0
+pydantic>=2.0.0

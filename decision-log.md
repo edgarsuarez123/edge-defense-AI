@@ -260,6 +260,41 @@ Agent prompts are defined as Python string constants in `services/agents/prompts
 
 ---
 
+## Agents Service Build
+
+---
+
+**[2026-10-16] Agents service skeleton built ahead of Week 7 schedule**
+Full `services/agents/` skeleton implemented in Week 3 while the perception pipeline is blocked on data prep. All LLM calls, PostgreSQL writes, RAG retrievals, Redis events, and SSE emissions are stubbed with clearly labeled STUB comments. The graph topology, state schema, validation logic, and prompt constants are real and tested.
+
+*Why now:* `data_prep.py` is running a 20-30 minute frame extraction job. The agent skeleton has no dependency on the perception pipeline — it can be built and structurally tested independently. Building it now keeps momentum and gives the full graph topology something to test against when vLLM is wired in Week 6.
+
+*What is real (tested and works):* `IncidentState` + `TrackRecord` TypedDicts, `completed_agents` operator.add reducer, all five injection patterns in `validate_agent_output`, LangGraph graph compilation with all 9 nodes, conditional edges, fan-out via Send API, fan-in via dual edges to `fan_in_gate`, interrupt() in `request_human_approval`, MemorySaver checkpointer.
+
+*What is stubbed (clearly labeled):* LLM calls (vLLM not running), PostgreSQL reads/writes, Redis XADD, SSE events, RAG embed+retrieve+rerank pipeline. Each stub has a comment describing the real implementation and the week it ships.
+
+*Alternatives considered:* Wait until Week 7 as scheduled (loses a week of momentum; no reason to wait when the architecture is locked). Build only state.py now and defer the graph (would require re-reading the same files again next session).
+
+---
+
+**[2026-10-16] LangGraph fan-out via Send API, not conditional edges with polling**
+Parallel dispatch to threat_analyst and ops_agent uses `Send("node", state)` objects returned from a conditional edge function, not a conditional edge that checks a condition on each call.
+
+*Why:* The `Send` API is LangGraph's canonical parallel dispatch mechanism. Both nodes are dispatched simultaneously. Fan-in is enforced by graph topology — both parallel nodes add edges to `fan_in_gate`, and LangGraph holds that node until both upstream branches complete. The `completed_agents` reducer (operator.add) tracks which agents finished as an audit trail, not as the actual synchronization mechanism.
+
+*Alternative:* Use a conditional edge after each agent that checks `len(completed_agents) == 2` and returns END otherwise. This creates a polling pattern with non-deterministic convergence — incorrect and fragile. The `Send` + topology approach is both simpler and correct.
+
+---
+
+**[2026-10-16] interrupt() called inside node, not interrupt_before= on compile**
+`request_human_approval` calls `interrupt(value)` directly inside the node body (LangGraph >= 0.2 pattern) rather than using `compile(interrupt_before=["request_human_approval"])`.
+
+*Why:* The inside-node approach lets the node control exactly what value is passed to the operator (the full incident payload including draft_alert). `interrupt_before` would pause the graph before the node runs, giving the caller no control over the interrupt payload — they would have to reconstruct it from state. The node-level interrupt is more explicit and testable.
+
+*Tradeoff:* The node must handle the resume value itself (via the return value of `interrupt()`). This is slightly more complex but gives full control.
+
+---
+
 ## RAG Stack
 
 ---

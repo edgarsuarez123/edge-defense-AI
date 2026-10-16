@@ -4,6 +4,73 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 
 ---
 
+## 2026-10-16 — Week 3 · Agents Service Skeleton (ahead of schedule)
+
+### Done
+- **Full `services/agents/` skeleton implemented** (11 files):
+  - `state.py` — `IncidentState` + `TrackRecord` TypedDicts; `completed_agents` with `Annotated[list[str], operator.add]` reducer for parallel fan-in
+  - `prompts/threat_analyst.py`, `ops_agent.py`, `reporting_agent.py`, `supervisor.py` — system prompt constants with injection meta-instructions; `prompts/__init__.py` re-exports all under canonical names
+  - `tools.py` — `search_knowledge_base` (shared, all agents), `get_track_history`, `get_drone_specs` (threat analyst), `get_procedures`, `get_incident_context` (ops agent), `get_approved_actions`, `draft_alert`, `request_approval` (reporting agent) — all stubbed, real shape
+  - `validation.py` — `validate_agent_output(output: str) -> bool` with all 5 injection regex patterns from architecture §4.4
+  - `vllm_config.py` — `VLLM_MODEL_ARGS`, `LLM_CLIENT_CONFIG`, VRAM budget comment
+  - `graph.py` — full LangGraph graph with all 9 nodes, Send API fan-out, dual-edge fan-in, 2-pass validation, `interrupt()` for human approval, `MemorySaver` stub checkpointer
+  - `__init__.py` — package init, re-exports `build_graph`, `IncidentState`, `TrackRecord`
+  - `requirements.txt` — langgraph, langgraph-checkpoint-postgres, langchain-openai, sqlalchemy, asyncpg, redis, pydantic
+- **All 4 verification checks pass:**
+  - `from services.agents.state import IncidentState, TrackRecord` — OK
+  - `from services.agents.prompts import THREAT_ANALYST_PROMPT, OPS_AGENT_PROMPT, REPORTING_AGENT_PROMPT` — OK
+  - All 5 injection patterns caught; clean output passes — OK
+  - `build_graph()` compiles — 9 nodes confirmed: `initialize_incident`, `run_threat_analyst`, `run_ops_agent`, `fan_in_gate`, `validate_output_pass1`, `run_reporting_agent`, `validate_output_pass2`, `request_human_approval`, `finalize`
+- **3 new decision-log entries**: agents built ahead of schedule, Send API fan-out, inside-node interrupt()
+
+### What is stubbed (labeled in code, ships Week 6)
+- All LLM calls (vLLM not running)
+- All PostgreSQL reads/writes (incidents, tracks, audit_log, pending_actions)
+- Redis XADD events
+- SSE emissions
+- RAG embed+retrieve+rerank pipeline (`search_knowledge_base` returns [])
+- PostgreSQL checkpointer (MemorySaver used for now)
+
+### Blockers
+None — skeleton is complete and testable independently of vLLM/DB.
+
+---
+
+## 2026-10-16 — Week 3 · Data Prep Pipeline (IN PROGRESS)
+
+### Done
+- **All 3 datasets downloaded and verified:**
+  - DUT Anti-UAV: 10,000 images (5200 train / 2600 val / 2200 test), Pascal VOC XML annotations
+  - Anti-UAV300 (RGB): ~318 sequences with visible.json + visible.mp4 per sequence
+  - Drone-vs-Bird: ~2,920 images in `drone-vs-bird.v2i.yolov8/` subdir, YOLO format
+  - MAV-VID: unavailable (Kaggle removed, Bitbucket clone corrupted) — excluded
+- **Fixed all 3 broken loaders in `services/perception/data_prep.py`:**
+  - `load_dut_anti_uav()` — rewrote from COCO JSON to Pascal VOC XML parser using stdlib `xml.etree.ElementTree`
+  - `load_anti_uav300_rgb()` — fixed: `RGB_label.json` → `visible.json`, `get_rect` → `gt_rect`, per-frame-dict → parallel lists, `[x1,y1,x2,y2]` → `[x,y,w,h]` top-left format; added cv2 frame extraction
+  - `load_drone_vs_bird()` — fixed inverted path (`images/train/` → `train/images/`) and wrong base dir in `main()`
+  - Added `_extract_anti_uav300_frames()` helper — extracts visible.mp4 → visible/visibleI{NNNN}.jpg, idempotent
+- **Added `opencv-python>=4.8.0` to `services/perception/requirements.txt`**
+
+### In Progress
+- `python services/perception/data_prep.py` running in background
+  - DUT Anti-UAV: parsing 10,000 VOC XMLs
+  - Anti-UAV300: extracting ~30K frames from 318 mp4 sequences (~20-30 min first run)
+  - Drone-vs-Bird: loading ~2,920 YOLO images
+  - Output: `data/raw/merged/{train,val,test}/` + `models/configs/yolo_data.yaml`
+
+### Next
+- Verify merged output: spot-check label files, confirm counts (~43K total)
+- `dvc add data/raw/merged && git add data/raw/merged.dvc`
+- `python services/perception/train.py --mode baseline` → log to MLflow
+- `python services/perception/train.py --mode finetune` → register drone-detector v1
+- TensorRT INT8 quantization of best.pt
+- Replace stub_publisher with real YOLOv8 + TensorRT inference node
+
+### Blockers
+- data_prep.py still running (frame extraction is slow — idempotent after first run)
+
+---
+
 ## 2026-10-16 — Week 3 · ROS 2 Docker Stack Verified
 
 ### Done

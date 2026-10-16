@@ -8,6 +8,38 @@ Every component we write together should leave me knowing not just what the code
 
 ---
 
+## Git workflow
+
+Every feature, component, or significant change must happen on a dedicated branch — never directly on `master`.
+
+**Branch naming:** `feat/<short-description>` (e.g., `feat/agents-skeleton`, `feat/rag-ingestion`, `feat/api-layer`)
+
+**Workflow for every implementation session:**
+1. Before writing any code, create a branch: `git checkout -b feat/<name>`
+2. Commit incrementally as work progresses — do not batch everything into one commit at the end
+3. When the feature is complete and verified, push the branch: `git push -u origin feat/<name>`
+4. Do NOT merge to master without explicit user instruction
+
+**Why:** `master` always reflects a working, verified state. Branches isolate in-progress work so a broken implementation can be abandoned or revised without touching anything that runs.
+
+**Exception:** Updates to `CLAUDE.md`, `decision-log.md`, or `progress.md` that accompany a feature commit go on the same branch as the feature — not as separate master commits.
+
+---
+
+## After each implementation
+
+After every implementation session (feature complete, verified, committed), provide a teaching explanation covering:
+
+1. **What was built** — plain-English summary of every file created or modified
+2. **How the pieces connect** — ASCII diagram or prose walkthrough of data flow
+3. **Every architecture tradeoff made** — what was chosen, what was rejected, and why
+4. **The one thing most likely to be misunderstood** — flag it explicitly and explain it slowly
+5. **What breaks if we do it differently** — make the cost of the wrong choice concrete
+
+This is not optional and does not depend on whether the implementation is "simple". Simple implementations often have the most hidden assumptions.
+
+---
+
 ## Project context
 
 Read these files before starting any work session:
