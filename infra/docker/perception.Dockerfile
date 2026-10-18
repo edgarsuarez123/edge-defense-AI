@@ -23,6 +23,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-sensor-msgs \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy and build the ROS 2 package BEFORE pip installs.
+# pip install torch upgrades setuptools, which breaks colcon's build of
+# ament_python packages (canonicalize_version() API change). colcon only
+# needs the system setuptools from apt — running it first avoids the conflict.
+COPY services/perception/ros2_nodes /ros2_ws/src/perception_nodes
+WORKDIR /ros2_ws
+RUN /bin/bash -c "source /opt/ros/humble/setup.bash && colcon build --packages-select perception_nodes"
+
 # Install torch with CUDA 12.4 support in a dedicated layer.
 # Why separate from ultralytics: torch is ~2GB. Docker layer caching means
 # an ultralytics version bump only re-downloads the ~200MB second layer,
@@ -49,14 +57,6 @@ RUN pip3 install --no-cache-dir \
 # utility: needed for nvidia-smi and CUDA management APIs.
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
-
-# Copy the ROS 2 package source
-COPY services/perception/ros2_nodes /ros2_ws/src/perception_nodes
-
-# Build the ROS 2 package
-# colcon build compiles the package and sets up install/ with the executables
-WORKDIR /ros2_ws
-RUN /bin/bash -c "source /opt/ros/humble/setup.bash && colcon build --packages-select perception_nodes"
 
 # Source both ROS 2 and the workspace on every shell invocation
 # The ENTRYPOINT below does this for CMD commands
