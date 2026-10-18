@@ -16,26 +16,81 @@
 
 services:
 
-  stub_publisher:
+  # ── Real perception pipeline ────────────────────────────────────────────────
+
+  image_replay:
     build:
       context: .
       dockerfile: infra/docker/perception.Dockerfile
-    command: ros2 run perception_nodes stub_publisher
-    # ROS 2 DDS discovery works within a Docker bridge network — containers in
-    # the same compose project on the same network see each other's topics.
-    # network_mode: host is NOT used here: on Docker Desktop (Windows/Mac) it
-    # shares the Hyper-V VM network, not the actual host, which is confusing and
-    # fragile. Bridge is correct and portable. See decision-log.md.
+    command: >
+      ros2 run perception_nodes image_replay --ros-args
+        -p image_dir:=/data/test/images
+        -p fps:=60.0
+        -p loop:=true
+    # Test images mounted read-only — the node reads but never writes.
+    # Path inside container: /data/test/images
+    # Path on host: ./data/raw/merged/test/images
+    volumes:
+      - ./data/raw/merged/test/images:/data/test/images:ro
     networks: [ros2_net]
     environment:
       ROS_DOMAIN_ID: 0
     restart: unless-stopped
     healthcheck:
-      # CMD-SHELL uses /bin/sh which does not have 'source' — use CMD + bash -c.
-      # ros2 node list returns exit 0 when DDS daemon is reachable.
-      # grep -q stub_publisher confirms this specific node is registered.
-      # start_period: DDS takes ~5-10s to register nodes; prevents Docker from
-      # restarting a healthy container that hasn't registered yet.
+      test: ["CMD", "/bin/bash", "-c", "source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && ros2 node list | grep -q image_replay"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  yolo_detector:
+    build:
+      context: .
+      dockerfile: infra/docker/perception.Dockerfile
+    command: >
+      ros2 run perception_nodes yolo_detector --ros-args
+        -p model_path:=/models/best.pt
+        -p conf_threshold:=0.25
+        -p device:=cuda:0
+    # Model weights mounted read-only. After training completes, copy best.pt
+    # from runs/detect/runs/train/drone-finetune/weights/best.pt into weights/.
+    # To test before training finishes, change model_path to /models/yolo26n.pt.
+    volumes:
+      - ./weights:/models:ro
+    networks: [ros2_net]
+    environment:
+      ROS_DOMAIN_ID: 0
+    restart: unless-stopped
+    # GPU reservation: Docker Compose v2 syntax for NVIDIA GPU passthrough.
+    # Requires NVIDIA Container Toolkit installed in WSL2 (see README).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "/bin/bash", "-c", "source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && ros2 node list | grep -q yolo_detector"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 30s   # model load (~10-15s) + DDS registration
+
+  # ── Stub pipeline (non-GPU testing) ────────────────────────────────────────
+  # Start with: docker compose -f docker-compose.perception.yml --profile stubs up
+
+  stub_publisher:
+    build:
+      context: .
+      dockerfile: infra/docker/perception.Dockerfile
+    command: ros2 run perception_nodes stub_publisher
+    networks: [ros2_net]
+    environment:
+      ROS_DOMAIN_ID: 0
+    restart: unless-stopped
+    profiles: ["stubs"]   # not started by default; use --profile stubs
+    healthcheck:
       test: ["CMD", "/bin/bash", "-c", "source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && ros2 node list | grep -q stub_publisher"]
       interval: 10s
       timeout: 10s

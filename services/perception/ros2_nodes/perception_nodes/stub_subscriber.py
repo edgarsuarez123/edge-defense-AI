@@ -35,30 +35,33 @@ class StubSubscriber(Node):
 
     def on_detection(self, msg: String) -> None:
         """
-        Called once per published message.
+        Called once per published frame (from yolo_detector or stub_publisher).
 
-        In the real tracker node, this callback would:
-            1. Deserialize the detection
-            2. Pass it to the Kalman filter
-            3. Publish the fused track on /tracks
+        Message format (from yolo_detector):
+            {"frame_id": int, "timestamp": str, "detections": [
+                {"confidence": float, "classification": str,
+                 "bbox": {x, y, w, h}, "sensor_source": "EO"}
+            ]}
 
-        Here we just log it to prove delivery.
+        In the real tracker node, this callback would pass the detections list
+        to the Kalman filter and publish fused tracks on /tracks.
         """
         try:
-            detection = json.loads(msg.data)
+            frame = json.loads(msg.data)
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Malformed detection message: {e}")
             return
 
         self.received_count += 1
-        classification = detection.get("classification", "UNKNOWN")
-        confidence = detection.get("confidence", 0.0)
-        frame_id = detection.get("frame_id", -1)
+        frame_id = frame.get("frame_id", -1)
+        detections = frame.get("detections", [])
 
-        self.get_logger().info(
-            f"[{self.received_count}] Received frame {frame_id}: "
-            f"{classification} confidence={confidence}"
-        )
+        for det in detections:
+            self.get_logger().info(
+                f"[{self.received_count}] frame {frame_id}: "
+                f"{det.get('classification', 'UNKNOWN')} "
+                f"confidence={det.get('confidence', 0.0)}"
+            )
 
 
 def main(args=None):

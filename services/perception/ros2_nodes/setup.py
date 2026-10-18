@@ -19,7 +19,10 @@ setup(
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            # Week 2 stubs — replaced by real detector nodes in Week 3
+            # Week 3 real nodes
+            "image_replay=perception_nodes.image_replay:main",
+            "yolo_detector=perception_nodes.yolo_detector:main",
+            # Week 2 stubs — kept for non-GPU pipeline testing
             "stub_publisher=perception_nodes.stub_publisher:main",
             "stub_subscriber=perception_nodes.stub_subscriber:main",
         ],

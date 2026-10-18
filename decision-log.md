@@ -177,6 +177,42 @@ The bridge between the ROS 2 sensor domain and the Redis application bus is a RO
 
 ---
 
+**[2026-10-18] Detection message format: per-frame JSON array, not per-detection**
+`yolo_detector` publishes one `std_msgs/String` message per frame containing `{frame_id, timestamp, detections: [...]}`, where `detections` is an array of all boxes found in that frame (possibly empty).
+
+*Why:* The downstream Kalman tracker needs all detections from a single frame together to associate them by timestamp. One message per detection would require the tracker to group by `frame_id` before associating — extra state management with no benefit. An empty-array message also explicitly signals "inference ran but found nothing," which is more informative than silence.
+
+*Alternatives considered:* One message per individual detection (simpler per-message schema but forces downstream grouping logic). Custom `.msg` file (type-safe but requires CMakeLists, a second package, and a colcon rebuild every time the schema evolves — premature for Week 3).
+
+---
+
+**[2026-10-18] Image transport: manual numpy conversion, not cv_bridge**
+`image_replay` converts numpy arrays to `sensor_msgs/Image` manually by setting `height`, `width`, `step`, `encoding`, and `data` fields. `yolo_detector` reverses this with `np.frombuffer().reshape()`.
+
+*Why:* `cv_bridge.CvBridge()` requires `ros-humble-cv-bridge`, a compiled C++ ROS package that adds an apt dependency and a non-trivial build step to the Dockerfile. The manual conversion is 4 lines of Python and is completely transparent about what it does. Once Gazebo takes over as the image source, `image_replay` is retired and `cv_bridge` would be irrelevant to add now.
+
+*Alternatives considered:* `cv_bridge.CvBridge().cv2_to_imgmsg()` (idiomatic ROS 2 but adds compiled dependency). `sensor_msgs_py.point_cloud2` utilities (wrong domain — those are for point clouds).
+
+---
+
+**[2026-10-18] Camera subscriber QoS: depth=1 BEST_EFFORT (latest-only)**
+`yolo_detector` subscribes to `/camera/image_raw` with `QoSProfile(depth=1, reliability=BEST_EFFORT)`.
+
+*Why:* Counter-UAS requires the freshest possible detection, not the oldest queued frame. If inference takes 30ms and the replay publishes at 60 FPS, frames are dropped — that is correct behavior. `BEST_EFFORT` tells ROS 2 not to buffer frames for delivery guarantees; `depth=1` caps the queue at one entry. Without `BEST_EFFORT`, a `RELIABLE` publisher + `RELIABLE` subscriber would buffer unprocessed frames and the detector would fall further behind over time.
+
+*Alternatives considered:* `depth=10 RELIABLE` (delivers every frame in order but allows unbounded queue growth when inference lags). `depth=1 RELIABLE` (limits queue size but still applies backpressure to the publisher).
+
+---
+
+**[2026-10-18] torch + ultralytics in separate Dockerfile RUN layers**
+The Dockerfile installs torch/torchvision in one `RUN` and ultralytics in a second `RUN`.
+
+*Why:* Docker layer caching. Torch with CUDA is ~2 GB. If both were in one `RUN`, every ultralytics version bump would re-download torch. Separate layers mean only the ~200 MB ultralytics layer is invalidated when its version changes. This meaningfully reduces build iteration time.
+
+*Alternatives considered:* Single `RUN pip install torch ultralytics` (simpler Dockerfile, but sacrifices build caching on the most common change — ultralytics version bumps).
+
+---
+
 **[2026-10-14] Decision model thresholds: dual threshold (ALERT + ESCALATION)**
 The decision model uses two independently configurable thresholds: `ALERT_THRESHOLD` (flags track yellow in UI, no agent workflow) and `ESCALATION_THRESHOLD` (triggers full agent workflow, red alert).
 
@@ -483,6 +519,21 @@ MAV-VID (40,232 images, originally planned as the largest dataset source) is exc
 *Impact:* the missing 40K samples represent about 11% of the originally planned dataset size. DUT Anti-UAV (10K) + Anti-UAV300 (296K) + Drone-vs-Bird (2.9K) provides more than enough positive examples. Anti-UAV300's 296K frames are the dominant contributor.
 
 *Alternatives considered:* Wait for MAV-VID to become available (indefinite blocker — Kaggle removal is permanent). Find a third-party mirror (not found; using unverified data for a defense system is inappropriate). Proceed without it (chosen — documented in progress.md and data/README.md).
+
+---
+
+**[2026-10-17] Training batch size: increase from 16 → 32 on next run**
+On the RTX 3080 (10GB VRAM), YOLOv8s at batch=16 and imgsz=640 uses approximately 5GB VRAM — leaving 5GB unused. Batch size is the primary lever for GPU utilization and training speed.
+
+*Recommended for next training run:* `FINETUNE_BATCH = 32` in `train.py`. Expected VRAM usage ~8GB, leaving 2GB headroom for PyTorch overhead. Estimated epoch time drops from ~25 min to ~14 min — a 44% speedup with no accuracy cost.
+
+*LR adjustment required:* the linear scaling rule states that when batch size doubles, learning rate should scale proportionally to maintain the same effective update magnitude. `FINETUNE_LR0 = 0.02` (was 0.01) when moving to batch=32.
+
+*Why not batch=48 or higher:* estimated VRAM at batch=48 exceeds 10GB — OOM risk. At full-stack deployment (vLLM LLM at ~4GB + TensorRT detector at ~1.5GB), VRAM headroom matters. Training at batch=32 is the safe ceiling.
+
+*Why this cannot be applied mid-run:* batch size and LR are baked into `last.pt` via `train_args`. Changing them mid-resume would produce an inconsistent LR schedule (the scheduler was built around the original batch size). Apply on the next full run or when patching `last.pt` before extending to 100 epochs.
+
+*Alternatives considered:* Increase imgsz to 1280 at batch=8 (uses similar VRAM, improves mAP50-95 via better spatial resolution — worth testing as a separate experiment after batch=32 baseline). Keep batch=16 (leaves GPU underutilized, no benefit).
 
 ---
 

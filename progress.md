@@ -4,6 +4,54 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 
 ---
 
+## 2026-10-17 — Week 3 · YOLO Training + Training Deep Dive
+
+### Done
+- **Diagnosed CPU vs GPU training bug** — system Python 3.14 has `torch+cpu` only. Identified correct GPU venv: `.venv-training/` (torch 2.6.0+cu124, CUDA=True). All future training must use `.venv-training/Scripts/python.exe`.
+- **Patched checkpoint epoch count** — `last.pt` had `epochs=30` baked in. Patched `ckpt['train_args']['epochs']` to 50 via torch.load/save before resuming. Backup saved as `last_epoch15_backup.pt`.
+- **Resumed training on GPU** — training restarted from epoch 17, confirmed GPU active (`3.77–4.98G VRAM`, ~10 it/s, ~25 min/epoch). Stopped cleanly at epoch 37 for the day.
+- **`FINETUNE_EPOCHS` updated 30 → 50** in `train.py`
+- **Understood training metrics** — full walkthrough of mAP50, mAP50-95, IoU, box loss, and what each means for drone detection in a defense context.
+- **Confirmed dataset is correct** — Drone-vs-Bird images ARE in the merged training set as hard negatives (bird labels dropped, bird images retained). Test set (30,983 images) is confirmed held out and untouched.
+
+### Metrics at epoch 37 (best so far)
+| mAP50 | mAP50-95 | Precision | Recall | Val box_loss |
+|-------|----------|-----------|--------|-------------|
+| 0.9943 | 0.7241 | 0.994 | 0.987 | 0.974 |
+
+Trend: mAP50-95 gaining ~0.005 per 5 epochs, val box_loss still falling — not plateaued. Worth continuing to epoch 50 or 100.
+
+### What is NOT done yet
+- Epochs 38–50 (or 100) not run — paused for the day, resume with command below
+- `best.pt` not logged to MLflow — no registered model yet
+- Baseline mAP not logged to MLflow — CI gate has no threshold yet
+- TensorRT INT8 quantization not started
+- Test set eval (`eval.py` on held-out 30,983 images) not run
+- DVC tracking of merged dataset not done (`dvc add data/raw/merged`)
+- `stub_publisher` not replaced with real YOLO inference ROS 2 node
+- Bird false-positive eval not written (run inference on bird-only subset, count FPs)
+
+### To resume training tomorrow
+```bash
+cd "C:/Users/Edgar/Defense Edge AI"
+.venv-training/Scripts/python.exe services/perception/train.py \
+  --mode resume \
+  --last-pt runs/detect/runs/train/drone-finetune/weights/last.pt \
+  --data models/configs/yolo_data.yaml
+```
+**Always use `.venv-training/Scripts/python.exe` — system python is CPU-only.**
+
+### Tomorrow (priority order)
+1. **Resume training** — let it run to epoch 50. Check epoch 45–50 gain; if still >0.004/5 epochs, patch and extend to 100.
+2. **DVC track merged dataset** — `dvc add data/raw/merged` before training finishes so MLflow data_version tag is meaningful.
+3. **Replace stub_publisher** — write the real YOLOv8 ROS 2 inference node (subscribes to `/camera/image_raw`, publishes to `/detections`). Can be done while training runs.
+4. **Post-training** (after epoch 50): log baseline to MLflow, register `best.pt` as `drone-detector v1`, run test set eval, begin TensorRT INT8 quantization.
+
+### Blockers
+None — training paused intentionally, resume command above.
+
+---
+
 ## 2026-10-16 — Week 3 · Agents Service Skeleton (ahead of schedule)
 
 ### Done

@@ -23,12 +23,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-sensor-msgs \
     && rm -rf /var/lib/apt/lists/*
 
-# No pip packages needed for stub nodes — rclpy and std_msgs come from apt above.
-# STUB: When redis_bridge_node is added (Week 3), create ros2_nodes/requirements.txt
-# containing redis>=5.0.0 and add:
-#   COPY services/perception/ros2_nodes/requirements.txt /tmp/ros2_requirements.txt
-#   RUN pip3 install --no-cache-dir -r /tmp/ros2_requirements.txt
-# Keep services/perception/requirements.txt separate — it's for host-side training scripts.
+# Install torch with CUDA 12.4 support in a dedicated layer.
+# Why separate from ultralytics: torch is ~2GB. Docker layer caching means
+# an ultralytics version bump only re-downloads the ~200MB second layer,
+# not torch again. If they were one RUN, every ultralytics change re-fetches torch.
+#
+# Why --extra-index-url instead of plain pip install torch:
+# PyPI's default torch wheel is CPU-only. The CUDA wheel lives on PyTorch's
+# own index. --extra-index-url adds it as a fallback source; pip picks the
+# CUDA wheel because it matches the system's CUDA version.
+RUN pip3 install --no-cache-dir \
+    torch torchvision \
+    --extra-index-url https://download.pytorch.org/whl/cu124
+
+# ultralytics brings in the YOLO API. opencv-python-headless avoids pulling
+# Qt/GTK GUI libraries that fail in a headless container.
+# numpy is pinned transitively by ultralytics; no explicit pin needed.
+RUN pip3 install --no-cache-dir \
+    ultralytics==8.4.178 \
+    opencv-python-headless
+
+# Tell the NVIDIA Container Toolkit which GPUs and capabilities to expose.
+# NVIDIA_VISIBLE_DEVICES=all: the toolkit mounts all available GPUs.
+# compute: needed for CUDA programs (torch, TensorRT).
+# utility: needed for nvidia-smi and CUDA management APIs.
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # Copy the ROS 2 package source
 COPY services/perception/ros2_nodes /ros2_ws/src/perception_nodes
