@@ -230,8 +230,24 @@ def run_resume(last_pt: Path, data_yaml: Path) -> None:
 
         model = YOLO(str(last_pt))
 
+        # Ultralytics registers its own MlflowCallback during model.train().
+        # That callback reads MLFLOW_TRACKING_URI from os.environ, finds the
+        # run ID stored in args.yaml from the original finetune session, and
+        # tries to log params (mode=train, model=last.pt) to it. Those params
+        # are already set (mode=resume, model=yolov8s.pt) on this run, so
+        # MLflow raises INVALID_PARAMETER_VALUE and Ultralytics drops tracking.
+        #
+        # Fix: pop MLFLOW_TRACKING_URI from the environment for the duration
+        # of model.train() so Ultralytics' callback no-ops. Our mlflow client
+        # is unaffected — mlflow.set_tracking_uri() above set the URI on the
+        # Python client directly, independent of the env var.
+        saved_uri = os.environ.pop("MLFLOW_TRACKING_URI", None)
         t0 = time.perf_counter()
-        train_results = model.train(resume=True)
+        try:
+            train_results = model.train(resume=True)
+        finally:
+            if saved_uri is not None:
+                os.environ["MLFLOW_TRACKING_URI"] = saved_uri
         train_time = time.perf_counter() - t0
 
         best_weights = Path(train_results.save_dir) / "weights" / "best.pt"
