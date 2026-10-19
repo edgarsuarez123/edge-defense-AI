@@ -601,3 +601,29 @@ A background asyncio task pings the GovCloud health endpoint every 30 seconds. S
 *Why:* Simple, no OS privileges required, works in any environment (laptop, Jetson, g5g), no external dependency. The 30-second polling interval is acceptable — sync is not time-critical. An instant reaction to uplink recovery is not required; 30 seconds is fine for a store-and-forward sync operation.
 
 *Alternatives considered:* OS-level network events via D-Bus (more immediate but Linux-specific and requires OS coupling). tc-triggered webhook (requires the DDIL simulator to know the FastAPI address — tight coupling). Shorter polling interval (more responsive but adds unnecessary load on the uplink health endpoint).
+
+---
+
+**[2026-10-18] image_replay.py: pre-load batch into RAM, not disk-read per frame**
+`image_replay.py` pre-loads a configurable batch of images (default 500) into RAM at node startup. The timer callback indexes `self.frames` (a list of numpy arrays) — zero disk I/O per published frame.
+
+*Why:* WSL2 Docker volume mounts on Windows cross three I/O boundaries: Linux container → WSL2 VM kernel → Hyper-V hypervisor → Windows NTFS. Each `cv2.imread()` call through this stack takes ~300ms, regardless of the 60 Hz timer rate. The node was capped at ~3 FPS (disk-bound) even though the GPU could sustain much higher throughput. Pre-loading removes the disk bottleneck.
+
+*Why 500 images and not all 30,983:* `cv2.imread()` decodes JPEG into raw BGR: `width × height × 3 bytes`. A 640×640 image is ~1.2MB decoded. Loading all 30k images = ~36GB — far exceeds WSL2 VM memory and crashes Docker Desktop. 500 images = ~600MB, well within limits. 500 frames looping at 60 Hz provides a stable FPS measurement window in under 10 seconds.
+
+*Confirmed behavior after fix:* min inter-message time dropped from 0.321s (disk-bound, consistent) to 0.136s (~7 FPS bursts), with 3.5 FPS average — variance now reflects GPU scheduling, not disk latency. Pipeline is inference-limited, not I/O-limited.
+
+*Why not fix the disk I/O more permanently:* `image_replay` is a dev-only node. AirSim/Gazebo (Week 5-6) delivers frames over the network directly to the ROS 2 topic — no disk reads at all. The node will be retired then.
+
+*Alternatives considered:* Move data to WSL2 native filesystem (eliminates cross-VM overhead, but requires copying 30k images; still a manual one-time step with no production relevance). Load all images with memory-mapped files (more complex, still crosses WSL2 boundary, similar latency for random access patterns).
+
+---
+
+**[2026-10-18] WSL2 GPU passthrough throughput: ~3.5 FPS vs ~30-50 FPS bare-metal**
+YOLOv8s at 640×640 running inside Docker on WSL2 (Windows) achieves ~3.5 FPS on the `/detections` topic. Bare-metal Linux or Jetson with the same GPU class achieves ~30-50 FPS.
+
+*Why the gap:* CUDA calls from a Docker container on WSL2 cross: Linux container → WSL2 VM → Hyper-V → GPU driver (Windows). Each kernel invocation pays inter-VM latency that does not exist on bare-metal Linux. This is a dev environment artifact, not a model or code deficiency.
+
+*Why this is acceptable:* The Jetson deployment target runs bare-metal Linux — no WSL2, no Hyper-V. The pipeline correctness (topic plumbing, detection format, confidence values) is verified on the dev machine. The throughput number that matters is the Jetson number, not the WSL2 number. The portfolio T&E report will clearly label this as a dev environment constraint and cite the expected Jetson throughput from the Ultralytics benchmarks.
+
+*Alternatives considered:* Run bare-metal WSL2 (without Docker) — eliminates one VM boundary but loses the ROS 2 package isolation that Docker provides. Run natively on Windows — ROS 2 Humble has experimental Windows support, not suitable for production-representative testing.

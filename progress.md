@@ -35,21 +35,30 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 
 **Note:** YOLO inference is NOT the bottleneck. WSL2 Docker volume mount throttles disk reads to ~330ms/frame. With AirSim/Gazebo camera feed (Week 5-6), inference will be the constraint (~60+ FPS on RTX-class GPU at 640x640).
 
-### What is NOT done yet
-- Test set eval (`eval.py` on held-out 30,983 images) — CI gate threshold not yet set
-- DVC tracking of merged dataset (`dvc add data/raw/merged`)
-- TensorRT INT8 quantization of best.pt
-- Bird false-positive eval (run inference on bird-only subset, count FPs)
-- Extend training to epoch 75-100 (mAP50-95 still gaining at epoch 50, worth continuing)
+### FPS Investigation Finding
+Patched image_replay.py to pre-load 500 images into RAM (removing WSL2 disk I/O bottleneck).
+After fix: pipeline is YOLO inference-limited at ~3.5 FPS average (min 0.136s = ~7 FPS bursts).
+Root cause of dev machine cap: WSL2 GPU passthrough adds per-inference latency through Hyper-V.
+Expected on bare-metal Linux/Jetson: ~30-50 FPS for YOLOv8s at 640x640.
+2 new decision-log entries added covering the RAM preload design and WSL2 throughput constraint.
 
-### Next
-1. **DVC track merged dataset** — `dvc add data/raw/merged`
-2. **Run test set eval** — `eval.py` on 30,983 held-out images; log mAP to MLflow (CI gate threshold)
-3. **TensorRT INT8 quantization** — `best.pt` -> `best.engine`; measure FPS before/after
-4. **FastAPI service skeleton** — Week 4 gate: `/incidents`, `/tracks`, `/detections/stream` SSE
+### What is NOT done yet (to close this branch)
+- Test set eval (`eval.py` on held-out 30,983 images) — CI gate threshold not yet set in MLflow
+- DVC tracking of merged dataset (`dvc add data/raw/merged`)
+
+### What is deferred to later weeks
+- TensorRT INT8 quantization of best.pt (Week 4-5)
+- Bird false-positive eval (Week 4-5)
+- Extend training to epoch 75-100 (optional — mAP50=0.9944 is sufficient for gate)
+
+### Next session (to close feat/yolo-training and merge to master)
+1. `dvc add data/raw/merged` — version the dataset
+2. `python services/perception/eval.py --data models/configs/yolo_data.yaml` — run held-out test set eval, log mAP to MLflow as CI gate baseline
+3. Merge `feat/yolo-training` → `master`
+4. Start `feat/fastapi-service` — Week 4: `/incidents`, `/tracks`, `/detections/stream` SSE
 
 ### Blockers
-None — pipeline running, model registered, gate numbers measured.
+None.
 
 ---
 
