@@ -36,6 +36,9 @@ yolov8s.pt
 yolov8n.pt
 yolov8m.pt
 
+# Trained model weights — DVC-tracked or MLflow-tracked, not git
+weights/
+
 # Editor
 .vscode/
 .idea/

@@ -4,6 +4,55 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 
 ---
 
+## 2026-10-18 — Week 3 · YOLO Inference Node + Full Pipeline (COMPLETE)
+
+### Done
+- **Designed and implemented real YOLO ROS 2 inference pipeline** (grilling session → plan → implementation):
+  - `services/perception/ros2_nodes/perception_nodes/image_replay.py` — replays test set images as `sensor_msgs/Image` at configurable FPS; manual numpy conversion (no cv_bridge); depth=1 publisher
+  - `services/perception/ros2_nodes/perception_nodes/yolo_detector.py` — subscribes to `/camera/image_raw` (depth=1, BEST_EFFORT), runs `YOLO.predict()`, publishes per-frame JSON to `/detections`
+  - Detection format: `{frame_id, timestamp, detections: [{confidence, classification, bbox, sensor_source}]}`
+  - `stub_subscriber.py` updated to parse new nested format
+- **Updated `setup.py`** — added `image_replay` and `yolo_detector` entry points
+- **Updated `perception.Dockerfile`**:
+  - Added `libgl1` (ultralytics pulls opencv-python which links libGL.so.1)
+  - Reordered: colcon build BEFORE pip install (avoids setuptools/ament_python conflict)
+  - Two separate pip RUN layers: torch (~2GB) + ultralytics (~200MB) — Docker layer cache efficiency
+  - Added `NVIDIA_VISIBLE_DEVICES=all`, `NVIDIA_DRIVER_CAPABILITIES=compute,utility`
+- **Updated `docker-compose.perception.yml`** — added `image_replay` + `yolo_detector` services with healthchecks; GPU reservation for detector; stub_publisher moved to `profiles: ["stubs"]`
+- **Fixed MLflow resume bug** — Ultralytics' MlflowCallback conflicts with our run on resume; fixed by temporarily popping `MLFLOW_TRACKING_URI` from env during `model.train(resume=True)`, restored in `finally`
+- **Training completed** — epoch 50, mAP50=0.9944, mAP50-95=0.7486
+- **best.pt copied** to `weights/best.pt` for Docker volume mount
+- **MLflow run logged** — finetune metrics logged, `drone-detector v1` registered using v2-compatible `create_model_version()` API (MLflow client 3.17.1 vs server 2.16.2 mismatch workaround)
+- **GPU passthrough verified** — `torch.cuda.is_available()` = True inside yolo_detector container
+- **End-to-end pipeline verified** — real drone detections flowing: confidence 0.26–0.85 per frame
+- **4 new decision-log entries**: per-frame JSON format, manual numpy conversion, QoS depth=1 BEST_EFFORT, separate Docker pip layers
+
+### Measured FPS — Week 3 Gate Numbers
+| Topic | Rate | Bottleneck |
+|-------|------|------------|
+| `/camera/image_raw` | ~3 FPS | WSL2 Windows filesystem mount (cv2.imread latency) |
+| `/detections` | ~3 FPS | Input-limited (same as above) |
+
+**Note:** YOLO inference is NOT the bottleneck. WSL2 Docker volume mount throttles disk reads to ~330ms/frame. With AirSim/Gazebo camera feed (Week 5-6), inference will be the constraint (~60+ FPS on RTX-class GPU at 640x640).
+
+### What is NOT done yet
+- Test set eval (`eval.py` on held-out 30,983 images) — CI gate threshold not yet set
+- DVC tracking of merged dataset (`dvc add data/raw/merged`)
+- TensorRT INT8 quantization of best.pt
+- Bird false-positive eval (run inference on bird-only subset, count FPs)
+- Extend training to epoch 75-100 (mAP50-95 still gaining at epoch 50, worth continuing)
+
+### Next
+1. **DVC track merged dataset** — `dvc add data/raw/merged`
+2. **Run test set eval** — `eval.py` on 30,983 held-out images; log mAP to MLflow (CI gate threshold)
+3. **TensorRT INT8 quantization** — `best.pt` -> `best.engine`; measure FPS before/after
+4. **FastAPI service skeleton** — Week 4 gate: `/incidents`, `/tracks`, `/detections/stream` SSE
+
+### Blockers
+None — pipeline running, model registered, gate numbers measured.
+
+---
+
 ## 2026-10-17 — Week 3 · YOLO Training + Training Deep Dive
 
 ### Done

@@ -21,7 +21,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-rclpy \
     ros-humble-std-msgs \
     ros-humble-sensor-msgs \
+    libgl1 \
     && rm -rf /var/lib/apt/lists/*
+# libgl1: ultralytics depends on opencv-python (non-headless) which links
+# against libGL.so.1. Adding the stub avoids pulling the full GUI stack.
 
 # Copy and build the ROS 2 package BEFORE pip installs.
 # pip install torch upgrades setuptools, which breaks colcon's build of

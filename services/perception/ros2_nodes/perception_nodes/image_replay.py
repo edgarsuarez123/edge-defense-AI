@@ -42,25 +42,47 @@ class ImageReplay(Node):
         self.declare_parameter("image_dir", "")
         self.declare_parameter("fps", 60.0)
         self.declare_parameter("loop", True)
+        # How many images to pre-load into RAM. Pre-loading removes the WSL2
+        # filesystem cross-VM overhead (~300ms/read) so the timer isn't disk-bound.
+        # 500 images decoded as BGR arrays = ~600MB RAM — safe for WSL2.
+        # Loading all 30k images would be ~36GB (640x640x3 bytes each) and OOMs.
+        # 500 frames looping at 60 FPS gives a stable Hz measurement in <10s.
+        self.declare_parameter("preload_count", 500)
 
         image_dir = self.get_parameter("image_dir").value
         fps = float(self.get_parameter("fps").value)
         self.loop = self.get_parameter("loop").value
+        preload_count = int(self.get_parameter("preload_count").value)
 
         if not image_dir:
             self.get_logger().error("image_dir parameter is required")
             raise RuntimeError("image_dir not set")
 
         # Glob both extensions, sort so replay order is deterministic across runs.
-        self.images = sorted(
+        paths = sorted(
             glob.glob(os.path.join(image_dir, "*.jpg"))
             + glob.glob(os.path.join(image_dir, "*.png"))
         )
-        if not self.images:
+        if not paths:
             self.get_logger().error(f"No images found in {image_dir}")
             raise RuntimeError(f"No images in {image_dir}")
 
-        self.get_logger().info(f"Loaded {len(self.images)} images from {image_dir}")
+        # Pre-load a batch of images into RAM so _publish_frame has zero disk I/O.
+        # WSL2 Windows filesystem mounts add ~300ms per cv2.imread call, which
+        # caps throughput at ~3 FPS regardless of the timer rate. Loading a fixed
+        # batch at startup removes the bottleneck — callbacks then run in <1ms.
+        # We cap at preload_count (default 500) to stay within WSL2 RAM limits:
+        # 500 images decoded as BGR arrays ~= 600MB; loading all 30k would be ~36GB.
+        batch = paths[:preload_count]
+        self.get_logger().info(f"Pre-loading {len(batch)}/{len(paths)} images into RAM...")
+        self.frames = []
+        self.paths = []
+        for p in batch:
+            img = cv2.imread(p)
+            if img is not None:
+                self.frames.append(img)
+                self.paths.append(p)
+        self.get_logger().info(f"Loaded {len(self.frames)} images from {image_dir}")
 
         # depth=1: if the detector is slow, it only ever sees the latest frame.
         # The detector's own depth=1 subscriber enforces this at its end too.
@@ -69,7 +91,7 @@ class ImageReplay(Node):
         self.index = 0
 
     def _publish_frame(self) -> None:
-        if self.index >= len(self.images):
+        if self.index >= len(self.frames):
             if self.loop:
                 self.index = 0
             else:
@@ -77,12 +99,7 @@ class ImageReplay(Node):
                 self.timer.cancel()
                 return
 
-        path = self.images[self.index]
-        img = cv2.imread(path)
-        if img is None:
-            self.get_logger().warning(f"Could not read {path}, skipping")
-            self.index += 1
-            return
+        img = self.frames[self.index]
 
         # Manual conversion: sensor_msgs/Image has no opaque format —
         # setting these 5 fields is all cv_bridge does internally.
@@ -99,7 +116,7 @@ class ImageReplay(Node):
         # Log on first frame and every 100th to avoid spamming at 60 FPS.
         if self.index == 1 or self.index % 100 == 0:
             self.get_logger().info(
-                f"Frame {self.index}/{len(self.images)}: {os.path.basename(path)}"
+                f"Frame {self.index}/{len(self.frames)}: {os.path.basename(self.paths[self.index - 1])}"
             )
 
 
