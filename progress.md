@@ -4,6 +4,56 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 
 ---
 
+## 2026-10-19 — Week 3 · Close-Out: DVC Dataset Versioning + Test Set Eval (COMPLETE)
+
+### Done
+- **DVC-tracked merged dataset** — `dvc add data/raw/merged`:
+  - 619,644 files (309,821 images + label pairs), 36GB total
+  - DVC hash: `e7db8a1da753d15f4938343b0a536554`
+  - `data/raw/merged.dvc` committed to git; `data/raw/merged` excluded via `.gitignore`
+  - `dvc push` to local remote (`data/dvc-store/`)
+- **Fixed `_get_data_version()` bug in `train.py`** — was looking for `models/configs/yolo_data.yaml.dvc` (will never exist). Now reads the dataset path from the YAML and looks for `data/raw/merged.dvc`, extracts first 12 chars of DVC md5 hash. Decision logged.
+- **Ran COCO pretrained baseline** — establishes CI gate floor in MLflow:
+  - `stage=baseline`, run name `baseline-coco-pretrained`
+  - mAP50=**0.0485** (expected — COCO has no "drone" class)
+  - MLflow run ID: `58e7438a92334217b6a85e779c7ee41c`
+- **Ran held-out test set eval** — 30,983 images, never seen during training:
+  - mAP50=**0.9943**, mAP50-95=**0.7495**, Precision=**0.9931**, Recall=**0.9876**
+  - FPS=**86.1** (pure GPU inference, no disk I/O — T&E number)
+  - CI gate: **PASS** (baseline 0.0485, candidate 0.9943, tolerance 0.005)
+  - MLflow run ID: `e3b78bbeb06e489583067f6db45b8f8d`
+
+### Test Set vs Val Set Comparison
+| Metric | Val (epoch 50, training) | Test (held-out) |
+|--------|--------------------------|-----------------|
+| mAP50 | 0.9944 | 0.9943 |
+| mAP50-95 | 0.7486 | 0.7495 |
+| Precision | 0.994 | 0.9931 |
+| Recall | 0.987 | 0.9876 |
+
+Val and test metrics are nearly identical (< 0.1% delta). No overfitting — the model generalizes well to held-out data.
+
+### FPS Clarification for T&E Report
+- **86.1 FPS** — pure YOLOv8s GPU inference at 640×640 on RTX hardware (WSL2, `model.predict()`, 100-image sample, CUDA sync)
+- **3.5 FPS** — ROS 2 end-to-end pipeline under WSL2 (dominated by Hyper-V GPU passthrough overhead, not YOLO inference)
+- Bare-metal Linux/Jetson target: 30–50 FPS end-to-end (expected, per Ultralytics benchmarks)
+- T&E report will cite 86.1 FPS as measured inference throughput with WSL2 overhead documented honestly
+
+### Branch Status
+`feat/yolo-training` — complete. Ready to merge to `master` on explicit instruction.
+
+### Next (Week 4)
+Start `feat/fastapi-service`:
+1. FastAPI skeleton: `GET /incidents`, `GET /tracks`, `POST /incidents/{id}/approve`, `POST /incidents/{id}/reject`
+2. SSE stream: `GET /stream` with `track_update`, `incident_update`, `approval_request` events
+3. PostgreSQL async reads via asyncpg/SQLAlchemy
+4. API key authentication middleware
+
+### Blockers
+None.
+
+---
+
 ## 2026-10-18 — Week 3 · YOLO Inference Node + Full Pipeline (COMPLETE)
 
 ### Done

@@ -627,3 +627,14 @@ YOLOv8s at 640×640 running inside Docker on WSL2 (Windows) achieves ~3.5 FPS on
 *Why this is acceptable:* The Jetson deployment target runs bare-metal Linux — no WSL2, no Hyper-V. The pipeline correctness (topic plumbing, detection format, confidence values) is verified on the dev machine. The throughput number that matters is the Jetson number, not the WSL2 number. The portfolio T&E report will clearly label this as a dev environment constraint and cite the expected Jetson throughput from the Ultralytics benchmarks.
 
 *Alternatives considered:* Run bare-metal WSL2 (without Docker) — eliminates one VM boundary but loses the ROS 2 package isolation that Docker provides. Run natively on Windows — ROS 2 Humble has experimental Windows support, not suitable for production-representative testing.
+
+---
+
+**[2026-10-19] _get_data_version() bug: was looking for wrong .dvc file path**
+`_get_data_version(data_yaml)` in `train.py` originally looked for `models/configs/yolo_data.yaml.dvc`. That file never exists and never will — DVC tracks the data directory, not the config yaml. Fixed to read the `path` key from the YAML, then look for `<dataset_root>.dvc` (i.e., `data/raw/merged.dvc`), and extract the first 12 chars of `outs[0].md5`.
+
+*Why this matters:* The `data_version` MLflow tag links a training run to an exact dataset version. Without the correct hash, `dvc checkout` from an MLflow run ID cannot be automated, breaking the reproducibility guarantee. With the fix: MLflow run → `data_version` tag → `dvc checkout data/raw/merged@{hash}` restores the exact dataset used.
+
+*How DVC .dvc files work:* `dvc add data/raw/merged` creates `data/raw/merged.dvc` with an `outs[0].md5` field containing the content-hash of the directory tree (all files hashed, then the manifest hashed). This is the dataset version fingerprint. The first 12 chars (`e7db8a1da753`) match git short-SHA convention for readability in MLflow UI.
+
+*Alternatives considered:* Track `yolo_data.yaml` with DVC directly (would create `models/configs/yolo_data.yaml.dvc`, but the yaml is config, not data — wrong thing to version-control with DVC). Use `dvc status` subprocess (original stub approach — returns human-readable status string, not a stable hash).
