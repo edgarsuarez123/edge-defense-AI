@@ -18,6 +18,7 @@ data/raw/*
 data/synthetic/*
 !data/raw/.gitkeep
 !data/synthetic/.gitkeep
+!data/raw/merged.dvc
 
 # DVC local remote store — actual dataset files, not in git
 data/dvc-store/

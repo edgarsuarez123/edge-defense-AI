@@ -295,24 +295,35 @@ def _extract_metrics(val_results) -> dict[str, float]:
 
 def _get_data_version(data_yaml: Path) -> str:
     """
-    Return DVC hash of the dataset for MLflow tagging.
-    If DVC is not initialized or the file is not tracked, returns 'untracked'.
+    Return the first 12 chars of the DVC md5 hash for the tracked dataset directory.
 
-    The data_version tag links an MLflow run to an exact DVC dataset version,
-    enabling reproducibility: given run_id -> data_version -> dvc checkout.
+    How it works:
+        Reads the dataset root path from the data YAML, then looks for a
+        <dataset_root>.dvc file (e.g. data/raw/merged.dvc). DVC .dvc files
+        store an outs[0].md5 field — the content hash of the directory tree.
+        That hash is the data version: two runs with the same hash used the
+        same exact dataset bytes.
+
+    Why read the YAML instead of deriving from data_yaml path:
+        The .dvc file is created by `dvc add data/raw/merged`, not by tracking
+        the YAML config file. The YAML records where the data lives; DVC tracks
+        the data itself. These are different paths.
+
+    Why 12 chars: sufficient for uniqueness in MLflow UI, matches git short-SHA
+    convention for readability.
     """
-    dvc_lock = data_yaml.parent / (data_yaml.name + ".dvc")
-    if dvc_lock.exists():
-        # STUB — replace with real DVC API call when DVC is tracking merged/
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["dvc", "status", str(data_yaml)],
-                capture_output=True, text=True, timeout=5
-            )
-            return result.stdout.strip()[:40] or "tracked"
-        except Exception:
-            return "dvc-error"
+    import yaml as _yaml
+    try:
+        with open(data_yaml) as f:
+            cfg = _yaml.safe_load(f)
+        dataset_root = Path(cfg["path"])
+        dvc_file = Path(str(dataset_root) + ".dvc")
+        if dvc_file.exists():
+            with open(dvc_file) as f:
+                dvc_meta = _yaml.safe_load(f)
+            return dvc_meta["outs"][0]["md5"][:12]
+    except Exception:
+        pass
     return "untracked"
 
 
