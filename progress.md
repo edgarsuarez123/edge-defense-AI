@@ -4,6 +4,45 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 
 ---
 
+## 2026-10-21 — Week 4 · vLLM Serving + RAG Ingestion Pipeline
+
+### Done
+- **`infra/docker/vllm.Dockerfile`** — official `vllm/vllm-openai:v0.32.0` base, ENTRYPOINT overridden to bash for env var expansion, CMD wires `$VLLM_MODEL`, `$VLLM_GPU_MEMORY_UTILIZATION`, `$VLLM_MAX_MODEL_LEN` to vLLM server args
+- **`docker-compose.dev.yml`** — `vllm` service added: image directly (no build), volume mount `./models/weights/qwen2.5-7b-awq:/models/qwen:ro`, served-model-name matches `vllm_config.py`, healthcheck on `/health` with 90s start_period, GPU reservation
+- **`services/agents/ingest.py`** — full RAG ingestion pipeline:
+  - pymupdf for PDF text extraction (handles military FM layouts)
+  - Hybrid chunker: regex on numbered headings for military docs, paragraph/sentence fallback for unstructured docs
+  - 512-token cap enforced with Qwen's actual tokenizer (loads from local weights if present, fetches tokenizer config only if not)
+  - 50-token overlap sliding window for oversized sections
+  - nomic-embed-text-v1.5 (CPU) with `"search_document: "` prefix for passage encoding
+  - psycopg2 + pgvector upsert with `ON CONFLICT DO NOTHING` for idempotent re-runs
+  - SHA-256 content hash dedup per (source_doc, chunk)
+  - CLI: `python -m services.agents.ingest --source data/docs/ [--dry-run]`
+- **`services/agents/tools.py`** — `search_knowledge_base` stub replaced with real implementation:
+  - Query embedded with `"search_query: "` prefix (nomic-embed-text-v1.5, CPU)
+  - pgvector HNSW search with over-fetch (`top_k * 3` candidates)
+  - Cross-encoder re-ranking (`cross-encoder/ms-marco-MiniLM-L-6-v2`)
+  - Returns `[{"content": str, "source": str, "score": float}]`
+  - New connection per call (psycopg2, thread-safe for LangGraph thread pool execution)
+- **`services/agents/requirements.txt`** — added `sentence-transformers>=3.0.0`, `pymupdf>=1.24.0`, `pgvector>=0.3.0`, `psycopg2-binary>=2.9.0`, `transformers>=4.40.0`
+- **7 new decision-log entries**: vLLM image choice, volume mount, served-model-name, ingestion location, pymupdf, hybrid chunking, CPU embedding, re-ranker inclusion
+
+### What is stubbed (labeled in code, ships Week 6)
+- vLLM not yet called from agent nodes (graph.py stubs unchanged — wired in Week 5-6)
+- PostgreSQL-backed tools (get_track_history, get_incident_context, etc.) still return placeholders
+
+### Pending before verification
+1. Download Qwen weights: `huggingface-cli download Qwen/Qwen2.5-7B-Instruct-AWQ --local-dir models/weights/qwen2.5-7b-awq`
+2. Source 3-5 Distribution A documents into `data/docs/`
+3. Run ingestion: `python -m services.agents.ingest --source data/docs/`
+4. Verify vLLM: `docker compose -f docker-compose.dev.yml up vllm`
+
+### Blockers
+- Model weights must be downloaded manually before `docker compose up vllm` will succeed
+- Documents must be sourced manually before `ingest.py` produces any output
+
+---
+
 ## 2026-10-19 — Week 3 · Close-Out: DVC Dataset Versioning + Test Set Eval (COMPLETE)
 
 ### Done

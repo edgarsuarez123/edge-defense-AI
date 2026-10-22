@@ -638,3 +638,87 @@ YOLOv8s at 640×640 running inside Docker on WSL2 (Windows) achieves ~3.5 FPS on
 *How DVC .dvc files work:* `dvc add data/raw/merged` creates `data/raw/merged.dvc` with an `outs[0].md5` field containing the content-hash of the directory tree (all files hashed, then the manifest hashed). This is the dataset version fingerprint. The first 12 chars (`e7db8a1da753`) match git short-SHA convention for readability in MLflow UI.
 
 *Alternatives considered:* Track `yolo_data.yaml` with DVC directly (would create `models/configs/yolo_data.yaml.dvc`, but the yaml is config, not data — wrong thing to version-control with DVC). Use `dvc status` subprocess (original stub approach — returns human-readable status string, not a stable hash).
+
+---
+
+## LLM Serving
+
+---
+
+**[2026-10-21] vLLM base image: official vllm/vllm-openai, pinned to v0.32.0**
+Use `vllm/vllm-openai:v0.32.0` as the base for the vLLM service. No custom code in the Dockerfile — env vars and command-line args configure everything.
+
+*Why the official image over nvidia/cuda + pip install vllm:* vLLM requires CUDA kernels that must be compiled against the exact CUDA version: FlashAttention, PagedAttention, and AWQ fused dequantization. Building these from a cuda base image takes hours (nvcc compilation). The official image ships them pre-compiled. The ~6GB image size is a one-time pull.
+
+*Why pinned (v0.32.0) and not `latest`:* vLLM releases frequently break API compatibility between minor versions. Pinning ensures the image that passes `curl` validation today is the same image used in production. `latest` would silently upgrade on the next `docker compose pull` and could break `--enable-prefix-caching` or `--quantization awq` flags.
+
+*Alternatives considered:* `nvidia/cuda` base + `pip install vllm` (build from scratch — hours of compilation, no advantage). `vllm/vllm-openai:latest` (fast, but non-reproducible).
+
+---
+
+**[2026-10-21] vLLM model delivery: volume mount, not baked into image**
+The Qwen2.5-7B-Instruct-AWQ weights (~4.2GB) are downloaded once to `models/weights/qwen2.5-7b-awq/` on the host and mounted read-only into the container at `/models/qwen`. The Dockerfile contains no `RUN huggingface-cli download` step.
+
+*Why volume mount:* Baking 4.2GB into the image produces a ~10.2GB image. Every `docker build` (e.g. after a Dockerfile change) re-downloads 4.2GB. The volume mount strategy: download once, mount always. Image stays at ~6GB and rebuilds are seconds not hours.
+
+*Why `models/weights/` inside the repo:* Already gitignored via the `weights/` pattern in `.gitignore`. Self-contained: everything the project needs lives under the repo root. Consistent with `yolov8s.pt` and `weights/best.pt` which follow the same pattern.
+
+*Alternatives considered:* `~/.cache/huggingface/` (HuggingFace default — shared across projects, but less visible and harder to document in the Quick Start). External path (e.g. `D:\models\`) — cleaner for large files but adds an undocumented host dependency.
+
+---
+
+**[2026-10-21] vLLM served-model-name: Qwen/Qwen2.5-7B-Instruct-AWQ (matches vllm_config.py)**
+The vLLM server is started with `--served-model-name Qwen/Qwen2.5-7B-Instruct-AWQ`. This matches the `model` key in `LLM_CLIENT_CONFIG` in `services/agents/vllm_config.py`.
+
+*Why this matters:* When serving from a local path (`--model /models/qwen`), vLLM defaults to using the path as the model name. ChatOpenAI sends `"model": "Qwen/Qwen2.5-7B-Instruct-AWQ"` in every request body. If the served name doesn't match, vLLM returns 404 "model not found" — the agents fail silently.
+
+---
+
+## RAG Stack
+
+---
+
+**[2026-10-21] Ingestion script location: services/agents/ingest.py**
+The RAG ingestion pipeline lives in `services/agents/ingest.py`, not `services/sync/` or a top-level `scripts/` directory.
+
+*Why agents/:* The embedding model, pgvector schema, and `document_chunks` table are agent-side concerns. `search_knowledge_base` (the consumer) lives in `services/agents/tools.py`. Co-locating producer and consumer makes imports straightforward and makes the dependency chain explicit. `services/sync/` is for GovCloud uplink data movement (Week 10) — putting ingestion there would create a false dependency.
+
+*Alternatives considered:* `scripts/ingest_docs.py` (clear it's a batch job, but decoupled from the agents package that owns the schema). `services/sync/ingest.py` (architecture initially referenced this but sync is cloud movement, not local ingestion).
+
+---
+
+**[2026-10-21] PDF parser: pymupdf (fitz), not pypdf**
+`pymupdf` is used to extract text from military PDFs. `pypdf` was not used.
+
+*Why pymupdf:* Military FMs use complex layouts — two-column text, tables spanning pages, numbered figure captions interleaved with body text. `pymupdf` extracts text block-by-block using the PDF's layout model and handles these correctly. `pypdf` is pure Python and struggles with anything beyond simple single-column documents: it merges columns, drops table rows, and mangles figure captions into the surrounding text. Mangled text produces garbage chunks and degrades retrieval quality.
+
+*Tradeoff:* `pymupdf` requires a C extension (~15MB install). `pypdf` is pure Python. The C extension is worth it for layout correctness.
+
+---
+
+**[2026-10-21] Chunking: hybrid (military heading regex + paragraph fallback)**
+Documents are chunked in two passes: if the text contains numbered military headings (matching `\d+-\d+\.`, `Chapter N`, `Appendix A`, etc.), split on those boundaries. Otherwise, split on paragraph breaks then sentence breaks. Both passes apply a 512-token sliding window (50-token overlap) to oversized sections.
+
+*Why hybrid:* Military FMs are structured documents — each numbered section is a self-contained semantic unit. Splitting on headings keeps related sentences together. FAA advisories and commercial spec sheets don't follow the same numbering convention, so the fallback handles them. Using only the fallback on military documents would break sections mid-sentence and create chunks with poor semantic coherence.
+
+*Why 512-token cap:* Matches the chunk size used in the architecture design decision (§6). Qwen's context is 8192 tokens; a 5-result retrieval gives at most 2560 tokens of RAG context, leaving room for system prompt + generation.
+
+*Why Qwen's tokenizer (not tiktoken):* The token count must match what vLLM sees. Qwen uses a different vocabulary than OpenAI's cl100k_base — a 512-cl100k chunk may be 520-560 Qwen tokens. The Qwen tokenizer is already available (model weights are volume-mounted); using it costs nothing and gives exact counts.
+
+---
+
+**[2026-10-21] Embedding device: CPU, not GPU**
+`nomic-embed-text-v1.5` (270MB) and `cross-encoder/ms-marco-MiniLM-L-6-v2` (80MB) both run on CPU.
+
+*Why CPU:* On the RTX 3080 (10GB), vLLM claims 7.5GB for model weights + KV cache. TensorRT YOLO claims ~1.5GB. That leaves ~1.0GB headroom. `nomic-embed` at fp32 needs ~1.1GB VRAM; at fp16 ~550MB — tight but possible. However, the latency difference is irrelevant: a single query embed call is <50ms on CPU (invisible to the operator). Batch ingestion of 500 chunks takes ~30s on CPU — a one-time setup cost. No benefit justifies adding 550MB+ of VRAM pressure to an already-tight budget.
+
+*Alternatives considered:* GPU fp16 (~550MB, ~5ms per embed). Rejected: VRAM cost is not worth the latency saving for this use case.
+
+---
+
+**[2026-10-21] Re-ranker: built in Week 4 (not deferred to Week 5)**
+The cross-encoder re-ranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`) is wired into `search_knowledge_base` alongside the HNSW vector search, not deferred.
+
+*Why now:* The re-ranker is ~20 lines. Including it from the start means retrieval quality is correct from first use. Without the re-ranker, HNSW returns approximate nearest neighbors by embedding cosine similarity — good but not optimal. The cross-encoder reads query + passage jointly and catches semantic relevance that cosine similarity misses (e.g. "counter-UAS jamming" matching a passage about EW procedures). Testing with degraded retrieval quality in Week 4 and fixing it in Week 5 would make Week 4 test results misleading.
+
+*Tradeoff:* adds ~30ms per search call (re-ranking 15 candidates). Acceptable for an operator-facing agent system where total latency budget is seconds not milliseconds.

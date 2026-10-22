@@ -50,8 +50,54 @@ services:
       bash -c "pip install psycopg2-binary --quiet && mlflow server --backend-store-uri $$MLFLOW_BACKEND_STORE_URI --default-artifact-root $$MLFLOW_DEFAULT_ARTIFACT_ROOT --host 0.0.0.0 --port 5000"
     restart: unless-stopped
 
+  vllm:
+    # Use the official image directly in dev — no build step, faster iteration.
+    # docker-compose.edge.yml uses build: + infra/docker/vllm.Dockerfile for the
+    # resource-constrained production-like stack.
+    #
+    # Why image directly and not build: here?
+    #   The Dockerfile is just FROM + EXPOSE + CMD. There is nothing to build.
+    #   Referencing the image skips the Docker build cache check on every up.
+    image: vllm/vllm-openai:v0.32.0
+    command: >-
+      --model /models/qwen
+      --served-model-name Qwen/Qwen2.5-7B-Instruct-AWQ
+      --gpu-memory-utilization 0.75
+      --max-model-len 8192
+      --max-num-seqs 4
+      --enable-prefix-caching
+      --dtype float16
+      --quantization awq
+      --host 0.0.0.0
+      --port 8000
+    volumes:
+      # Model weights downloaded once to host, mounted read-only into container.
+      # Download: huggingface-cli download Qwen/Qwen2.5-7B-Instruct-AWQ \
+      #           --local-dir models/weights/qwen2.5-7b-awq
+      - ./models/weights/qwen2.5-7b-awq:/models/qwen:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      # /health returns 200 only after the model is fully loaded.
+      # start_period=90s accounts for model load time (~60-75s for 4GB AWQ on RTX 3080).
+      # 15 retries * 10s interval = 150s additional window after start_period.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      start_period: 90s
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
   # ── Future services (added in later weeks) ──────────────────────────────────
-  # vllm:      week 4 — serves Qwen2.5-7B-Instruct-AWQ
   # api:       week 7 — FastAPI REST + SSE
   # agents:    week 7 — LangGraph supervisor + 3 agents
   # ui:        week 7 — React SPA
