@@ -97,8 +97,25 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
 
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    env_file: .env
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
   # ── Future services (added in later weeks) ──────────────────────────────────
-  # api:       week 7 — FastAPI REST + SSE
   # agents:    week 7 — LangGraph supervisor + 3 agents
   # ui:        week 7 — React SPA
   # sync:      week 10 — uplink monitor + GovCloud sync worker

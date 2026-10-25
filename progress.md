@@ -4,7 +4,46 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 
 ---
 
-## 2026-10-21 — Week 4 · vLLM Serving + RAG Ingestion Pipeline
+## 2026-10-25 — Week 4 · FastAPI Skeleton (COMPLETE)
+
+### Done
+- **`services/api/main.py`** — FastAPI app with lifespan (engine disposal on shutdown), CORS middleware, includes all routers
+- **`services/api/auth.py`** — `require_api_key` FastAPI dependency; reads `API_KEY` from env, returns 401 with `WWW-Authenticate: Bearer` on mismatch; uses `HTTPBearer(auto_error=False)` for clean error responses
+- **`services/api/database.py`** — `create_async_engine` with pool_size=5, `async_sessionmaker`, `get_db()` dependency that yields one `AsyncSession` per request
+- **`services/api/schemas.py`** — Pydantic v2 response models: `TrackResponse`, `PendingActionResponse`, `IncidentResponse`, `RejectRequest`, `HealthResponse`; mirror DB schema exactly
+- **`services/api/routes/health.py`** — `GET /health` (no auth); pings postgres (`SELECT 1`) and redis (`PING`), returns `ok`/`degraded` with per-service status
+- **`services/api/routes/incidents.py`** — `GET /incidents?incident_status=`, `GET /incidents/{id}` (with pending_actions join), `POST /incidents/{id}/approve`, `POST /incidents/{id}/reject`; approve/reject write atomically to `pending_actions`, `incidents`, and `audit_log`
+- **`services/api/routes/tracks.py`** — `GET /tracks?limit=&since=`; limit capped at 500; ordered `detected_at DESC`
+- **`services/api/routes/stream.py`** — `GET /stream?token=` SSE endpoint via `sse-starlette`; subscribes to Redis `incident_events` stream via `XREAD block=1000`; emits `track_update` events and keepalive comments on empty cycles
+- **`services/api/requirements.txt`** — fastapi, uvicorn[standard], sqlalchemy[asyncio], asyncpg, redis[asyncio], sse-starlette, pydantic, python-dotenv
+- **`infra/docker/api.Dockerfile`** — python:3.11-slim (asyncpg has pre-built wheels), two-layer COPY (requirements first for cache), uvicorn entrypoint with --reload in dev
+- **`docker-compose.dev.yml`** — `api` service added: build from api.Dockerfile, depends on postgres + redis healthy, port 8080, healthcheck on `/health`
+
+### What is stubbed (ships Week 7)
+- `agent_stream` SSE events — requires live LangGraph integration
+- `POST /admin/ingest` and `GET /sync/status`, `POST /sync/trigger` — deferred to Week 10
+- All route DB reads are async raw SQL (no ORM models) — ORM layer added if needed
+
+### Pending before full verification (manual steps required)
+```bash
+# Build and start
+docker compose -f docker-compose.dev.yml build api
+docker compose -f docker-compose.dev.yml up api
+
+# Verify
+curl http://localhost:8080/health
+curl -H "Authorization: Bearer <API_KEY>" http://localhost:8080/incidents
+curl -H "Authorization: Bearer <API_KEY>" http://localhost:8080/tracks
+# SSE (in browser or with curl --no-buffer):
+curl -N "http://localhost:8080/stream?token=<API_KEY>"
+```
+
+### Blockers
+- vLLM and RAG ingestion still require manual steps (model weights download + doc sourcing) — tracked in previous entry
+
+---
+
+## 2026-10-21 — Week 4 · vLLM Serving + RAG Ingestion Pipeline (IN PROGRESS)
 
 ### Done
 - **`infra/docker/vllm.Dockerfile`** — official `vllm/vllm-openai:v0.32.0` base, ENTRYPOINT overridden to bash for env var expansion, CMD wires `$VLLM_MODEL`, `$VLLM_GPU_MEMORY_UTILIZATION`, `$VLLM_MAX_MODEL_LEN` to vLLM server args
@@ -31,11 +70,30 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 - vLLM not yet called from agent nodes (graph.py stubs unchanged — wired in Week 5-6)
 - PostgreSQL-backed tools (get_track_history, get_incident_context, etc.) still return placeholders
 
-### Pending before verification
-1. Download Qwen weights: `huggingface-cli download Qwen/Qwen2.5-7B-Instruct-AWQ --local-dir models/weights/qwen2.5-7b-awq`
-2. Source 3-5 Distribution A documents into `data/docs/`
-3. Run ingestion: `python -m services.agents.ingest --source data/docs/`
-4. Verify vLLM: `docker compose -f docker-compose.dev.yml up vllm`
+### Pending before verification (manual steps required)
+
+```bash
+# 1. Download model weights (~4.2GB, one-time)
+huggingface-cli download Qwen/Qwen2.5-7B-Instruct-AWQ \
+    --local-dir "models/weights/qwen2.5-7b-awq"
+
+# 2. Source 3-5 Distribution A documents into data/docs/
+#    - ATP 3-01.81 (Counter-UAS) — army.mil/publications
+#    - FAA AC 107-2A — faa.gov
+#    - DJI Mavic 3 or Matrice 300 RTK spec sheet — manufacturer site
+
+# 3. Run ingestion (dry-run first to verify parsing)
+python -m services.agents.ingest --source data/docs/ --dry-run
+python -m services.agents.ingest --source data/docs/
+
+# 4. Bring up vLLM (takes ~90s for model load)
+docker compose -f docker-compose.dev.yml up vllm
+
+# 5. Verify
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen2.5-7B-Instruct-AWQ","messages":[{"role":"user","content":"Hello"}]}'
+```
 
 ### Blockers
 - Model weights must be downloaded manually before `docker compose up vllm` will succeed
