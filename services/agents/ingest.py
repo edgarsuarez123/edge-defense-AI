@@ -248,7 +248,10 @@ def _connect_db() -> psycopg2.extensions.connection:
         "can't adapt type 'numpy.ndarray'". register_vector teaches psycopg2
         how to serialize numpy arrays as the PostgreSQL vector type.
     """
-    if url := os.getenv("DATABASE_URL"):
+    # psycopg2 requires postgresql:// — strip any +driver suffix (asyncpg, psycopg2, etc.)
+    raw = os.getenv("DATABASE_SYNC_URL") or os.getenv("DATABASE_URL", "")
+    url = re.sub(r"^(postgresql|postgres)\+\w+://", r"\1://", raw)
+    if url:
         conn = psycopg2.connect(url)
     else:
         conn = psycopg2.connect(
