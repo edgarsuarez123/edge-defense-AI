@@ -4,6 +4,47 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 
 ---
 
+## 2026-10-25 — Week 4 · Close-Out: vLLM Verified + RAG Ingested (COMPLETE)
+
+### Done
+- **vLLM serving verified end-to-end:**
+  - `vllm/vllm-openai:v0.32.0` image pulled and running
+  - Qwen2.5-7B-Instruct-AWQ weights mounted at `/models/qwen` from `models/weights/qwen2.5-7b-awq/`
+  - Healthcheck passes — model loads in ~4 min (image pull + model load on first run, ~30s on subsequent starts)
+  - Completion test: `POST /v1/chat/completions` returns coherent on-domain response
+  - Model confirmed: `Qwen/Qwen2.5-7B-Instruct-AWQ`, context=8192 tokens
+- **RAG ingestion verified:**
+  - 3 Distribution A documents ingested: `AC_107-2A.pdf` (210 chunks), `atp3-01-81.pdf` (206 chunks), `M300_RTK_User_Manual_EN_v4.0.pdf` (101 chunks)
+  - 517 total inserted, 10 skipped (SHA-256 dedup on cross-doc duplicate content — working correctly)
+  - All embeddings at VECTOR(768) — confirmed via `vector_dims()` query
+  - HNSW index will serve queries against all 517 chunks
+- **Bug fix — `ingest.py` URL normalization:** `DATABASE_SYNC_URL` uses `postgresql+psycopg2://`, `DATABASE_URL` uses `postgresql+asyncpg://` — psycopg2 requires plain `postgresql://`. Fixed with `re.sub(r'^(postgresql|postgres)\+\w+://', ...)` to strip any driver suffix.
+- **Huggingface CLI workaround:** `huggingface-cli` not on system PATH; installed `huggingface_hub[cli]` into `.venv-training/` and used `snapshot_download()` API directly.
+
+### Week 4 gate — PASS
+| Item | Result |
+|---|---|
+| vLLM serves Qwen2.5-7B-AWQ | ✓ healthy, completion verified |
+| RAG chunks in pgvector | ✓ 517 chunks at VECTOR(768) |
+| FastAPI skeleton | ✓ all routes built, Dockerized |
+| Model weights downloaded | ✓ `models/weights/qwen2.5-7b-awq/` |
+
+### What is stubbed (ships Week 5–7)
+- vLLM not yet called from agent nodes — LLM calls wired in Week 5–6
+- FastAPI not yet containerized and verified end-to-end (code complete, Docker build pending)
+- `search_knowledge_base` retrieval tool not yet integration-tested against live DB
+
+### Next (Week 5)
+- Wire Qwen2.5-7B into agent nodes via `langchain-openai` OpenAI-compatible client pointing at `http://vllm:8000/v1`
+- Integration-test `search_knowledge_base` against live pgvector — verify retrieved chunks cite correct source docs
+- TensorRT INT8 quantization of `best.pt` (deferred from Week 3) — measure FPS before/after
+- Decision model: research open Jev-style alternatives (SemIf, Laya, or fine-tuned classifier on triage labels)
+
+### Blockers
+None.
+
+---
+
 ## 2026-10-25 — Week 4 · FastAPI Skeleton (COMPLETE)
 
 ### Done
