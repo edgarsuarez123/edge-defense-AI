@@ -1,1 +1,9 @@
-# services/api — dependencies added in week 7
+# services/api — FastAPI REST + SSE server
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+sqlalchemy[asyncio]>=2.0.0
+asyncpg>=0.29.0
+redis[asyncio]>=5.0.0
+sse-starlette>=2.1.0
+pydantic>=2.7.0
+python-dotenv>=1.0.0

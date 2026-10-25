@@ -18,9 +18,68 @@ Stub policy:
 """
 
 import logging
+import os
+
+import psycopg2
+import psycopg2.extensions
 from langchain_core.tools import tool
+from pgvector.psycopg2 import register_vector
+from sentence_transformers import CrossEncoder, SentenceTransformer
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Lazy model singletons — loaded once per process, reused per tool call.
+# Both models run on CPU: nomic-embed is 270MB, cross-encoder is 80MB.
+# Loading on GPU would add ~350MB VRAM pressure on top of vLLM's 7.5GB budget.
+# At query time, one embed call takes <50ms on CPU — invisible to the operator.
+# ---------------------------------------------------------------------------
+
+_embedder: SentenceTransformer | None = None
+_reranker: CrossEncoder | None = None
+
+
+def _get_embedder() -> SentenceTransformer:
+    global _embedder
+    if _embedder is None:
+        logger.info("Loading nomic-embed-text-v1.5 on CPU...")
+        _embedder = SentenceTransformer("nomic-ai/nomic-embed-text-v1.5", device="cpu")
+    return _embedder
+
+
+def _get_reranker() -> CrossEncoder:
+    global _reranker
+    if _reranker is None:
+        logger.info("Loading cross-encoder/ms-marco-MiniLM-L-6-v2...")
+        _reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    return _reranker
+
+
+def _open_db() -> psycopg2.extensions.connection:
+    """
+    Open a fresh psycopg2 connection per tool call.
+
+    Why a new connection per call and not a pool:
+        search_knowledge_base is called from LangGraph's thread pool executor
+        (because it is a sync tool in an async graph). A new connection per call
+        is safe across threads — no shared state to corrupt. The latency cost is
+        <5ms, negligible compared to the embedding (~50ms) and re-ranking (~30ms).
+        A pool can be added in Week 6 when the agents service is containerized and
+        connection count becomes a concern.
+    """
+    if url := os.getenv("DATABASE_URL"):
+        conn = psycopg2.connect(url)
+    else:
+        conn = psycopg2.connect(
+            host=os.getenv("POSTGRES_HOST", "localhost"),
+            port=int(os.getenv("POSTGRES_PORT", "5433")),
+            user=os.getenv("POSTGRES_USER", "edge"),
+            password=os.getenv("POSTGRES_PASSWORD", "edge"),
+            dbname=os.getenv("POSTGRES_DB", "edge"),
+        )
+    register_vector(conn)
+    return conn
 
 
 # ---------------------------------------------------------------------------
@@ -43,17 +102,74 @@ def search_knowledge_base(
         top_k: Maximum number of chunks to return (default 5).
         source_filter: Optional document name prefix to restrict results (e.g. "FM 3-01").
     """
-    # STUB — replace with real implementation in Week 5 (RAG ingestion sprint)
-    # Real implementation will:
-    #   1. Embed `query` with nomic-embed-text-v1.5
-    #   2. Search document_chunks table via pgvector HNSW index (VECTOR(768))
-    #   3. Re-rank with cross-encoder/ms-marco-MiniLM-L-6-v2
-    #   4. Return top_k chunks as {"content": str, "source": str, "score": float}
-    logger.warning(
-        "search_knowledge_base called but RAG not yet ingested — returning empty. "
-        "Ingest documents via scripts/ingest_docs.py before running agents in production."
-    )
-    return []
+    # Step 1 — embed the query.
+    # "search_query: " prefix is required by nomic-embed-text-v1.5 at retrieval time.
+    # Passages were ingested with "search_document: " — the asymmetric prefixes are
+    # part of the model's training and omitting them measurably degrades recall.
+    embedder = _get_embedder()
+    query_vec = embedder.encode(f"search_query: {query}")
+
+    # Step 2 — pgvector HNSW search with over-fetch for re-ranking.
+    # We retrieve top_k * 3 candidates so the cross-encoder has enough to work with.
+    # The HNSW index (m=16, ef_construction=64, cosine) was built at migration time.
+    # The <=> operator is cosine distance (lower = more similar). 1 - distance = similarity.
+    fetch_k = top_k * 3
+    conn = _open_db()
+    try:
+        with conn.cursor() as cur:
+            if source_filter:
+                cur.execute(
+                    """
+                    SELECT content, source_doc,
+                           1 - (embedding <=> %s) AS cosine_similarity
+                    FROM document_chunks
+                    WHERE source_doc LIKE %s
+                    ORDER BY embedding <=> %s
+                    LIMIT %s
+                    """,
+                    (query_vec, f"{source_filter}%", query_vec, fetch_k),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT content, source_doc,
+                           1 - (embedding <=> %s) AS cosine_similarity
+                    FROM document_chunks
+                    ORDER BY embedding <=> %s
+                    LIMIT %s
+                    """,
+                    (query_vec, query_vec, fetch_k),
+                )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        logger.warning(
+            "search_knowledge_base returned no results. "
+            "Run: python -m services.agents.ingest --source data/docs/"
+        )
+        return []
+
+    # Step 3 — cross-encoder re-ranking.
+    # The HNSW search returns approximate nearest neighbors by embedding similarity.
+    # The cross-encoder scores each (query, passage) pair jointly — it reads both
+    # texts together, so it catches semantic relevance that embedding cosine similarity
+    # misses (e.g. "drone countermeasures" matching a passage about jamming procedures).
+    reranker = _get_reranker()
+    pairs = [(query, row[0]) for row in rows]
+    scores = reranker.predict(pairs)
+
+    # Zip scores back to rows, sort descending, return top_k
+    ranked = sorted(zip(scores, rows), key=lambda x: x[0], reverse=True)
+    return [
+        {
+            "content": row[0],
+            "source": row[1],
+            "score": float(score),
+        }
+        for score, row in ranked[:top_k]
+    ]
 
 
 # ---------------------------------------------------------------------------

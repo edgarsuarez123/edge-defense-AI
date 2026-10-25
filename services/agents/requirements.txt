@@ -1,6 +1,7 @@
 # services/agents — LangGraph agent mesh dependencies
-# Week 3: skeleton + stubs (all external calls are stubbed, no vLLM or DB required yet)
-# Week 6: uncomment or add: langgraph-checkpoint-postgres, psycopg2/asyncpg for real DB writes
+# Week 3: skeleton + stubs
+# Week 4: vLLM serving + RAG ingestion pipeline (sentence-transformers, pymupdf, pgvector)
+# Week 6: langgraph-checkpoint-postgres, asyncpg for real DB writes + checkpointer
 
 langgraph>=0.2.0
 langgraph-checkpoint-postgres>=2.0.0
@@ -10,3 +11,15 @@ sqlalchemy[asyncio]>=2.0.0
 asyncpg>=0.29.0
 redis>=5.0.0
 pydantic>=2.0.0
+
+# Week 4 — RAG ingestion + retrieval
+# sentence-transformers: nomic-embed-text-v1.5 (embedding) + cross-encoder (re-ranking)
+# pymupdf: PDF text extraction for military manuals (handles complex layouts)
+# pgvector: psycopg2 type adapter — enables embedding <=> operator in raw SQL
+# psycopg2-binary: sync PostgreSQL driver for search_knowledge_base tool
+# transformers: Qwen tokenizer for exact 512-token chunk boundary enforcement
+sentence-transformers>=3.0.0
+pymupdf>=1.24.0
+pgvector>=0.3.0
+psycopg2-binary>=2.9.0
+transformers>=4.40.0
