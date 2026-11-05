@@ -23,8 +23,9 @@ import os
 import psycopg2
 import psycopg2.extensions
 from langchain_core.tools import tool
-from pgvector.psycopg2 import register_vector
 from sentence_transformers import CrossEncoder, SentenceTransformer
+
+from services.agents.db import connect_sync
 
 logger = logging.getLogger(__name__)
 
@@ -68,18 +69,7 @@ def _open_db() -> psycopg2.extensions.connection:
         A pool can be added in Week 6 when the agents service is containerized and
         connection count becomes a concern.
     """
-    if url := os.getenv("DATABASE_URL"):
-        conn = psycopg2.connect(url)
-    else:
-        conn = psycopg2.connect(
-            host=os.getenv("POSTGRES_HOST", "localhost"),
-            port=int(os.getenv("POSTGRES_PORT", "5433")),
-            user=os.getenv("POSTGRES_USER", "edge"),
-            password=os.getenv("POSTGRES_PASSWORD", "edge"),
-            dbname=os.getenv("POSTGRES_DB", "edge"),
-        )
-    register_vector(conn)
-    return conn
+    return connect_sync()
 
 
 # ---------------------------------------------------------------------------

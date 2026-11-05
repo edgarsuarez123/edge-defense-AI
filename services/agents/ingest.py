@@ -52,9 +52,10 @@ from pathlib import Path
 import fitz  # pymupdf
 import psycopg2
 import psycopg2.extensions
-from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
+
+from services.agents.db import connect_sync
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -248,21 +249,7 @@ def _connect_db() -> psycopg2.extensions.connection:
         "can't adapt type 'numpy.ndarray'". register_vector teaches psycopg2
         how to serialize numpy arrays as the PostgreSQL vector type.
     """
-    # psycopg2 requires postgresql:// — strip any +driver suffix (asyncpg, psycopg2, etc.)
-    raw = os.getenv("DATABASE_SYNC_URL") or os.getenv("DATABASE_URL", "")
-    url = re.sub(r"^(postgresql|postgres)\+\w+://", r"\1://", raw)
-    if url:
-        conn = psycopg2.connect(url)
-    else:
-        conn = psycopg2.connect(
-            host=os.getenv("POSTGRES_HOST", "localhost"),
-            port=int(os.getenv("POSTGRES_PORT", "5433")),
-            user=os.getenv("POSTGRES_USER", "edge"),
-            password=os.getenv("POSTGRES_PASSWORD", "edge"),
-            dbname=os.getenv("POSTGRES_DB", "edge"),
-        )
-    register_vector(conn)
-    return conn
+    return connect_sync()
 
 
 def _upsert_chunks(
