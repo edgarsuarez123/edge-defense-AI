@@ -38,6 +38,8 @@ logger = logging.getLogger("rag_eval")
 KS = (1, 3, 5, 10)
 FETCH_K = 30  # candidate pool for both orderings (production uses top_k*3 = 15 at k=5)
 CUTOFFS = (-4, -3, -2, -1, 0, 1, 2, 3)
+# vector = HNSW order; hybrid = vector+keyword RRF order; *rerank = cross-encoder over that pool
+PIPES = ("vector", "hybrid", "rerank", "hybrid_rerank")
 
 
 def load_golden(path: Path) -> tuple[list[dict], str]:
@@ -69,8 +71,10 @@ def evaluate(rows: list[dict]) -> tuple[list[dict], dict]:
     per_query, unlocated = [], 0
     for r in rows:
         cands = retrieve_candidates(r["query"], FETCH_K)
+        hyb = retrieve_candidates(r["query"], FETCH_K, mode="hybrid")
         ranked = rerank(r["query"], cands)
-        pipes = {"vector": cands[:max(KS)], "rerank": ranked[:max(KS)]}
+        pipes = {"vector": cands[:max(KS)], "hybrid": hyb[:max(KS)],
+                 "rerank": ranked[:max(KS)], "hybrid_rerank": rerank(r["query"], hyb)[:max(KS)]}
         gold = [Span(g["doc"], g["page_start"], g["page_end"], g["grade"]) for g in r["relevant"]]
         rec = {"id": r["id"], "type": r["type"], "answerable": r["answerable"], "query": r["query"],
                "top_rerank_score": ranked[0]["score"] if ranked else None}
@@ -89,7 +93,7 @@ def evaluate(rows: list[dict]) -> tuple[list[dict], dict]:
 def aggregate(per_query: list[dict]) -> dict:
     ans = [q for q in per_query if q["answerable"]]
     agg: dict[str, float] = {}
-    for pipe in ("vector", "rerank"):
+    for pipe in PIPES:
         for m in ans[0][pipe]:
             agg[f"{pipe}_{m}"] = statistics.mean(q[pipe][m] for q in ans)
     return agg
@@ -116,12 +120,15 @@ def write_report(label, sha, per_query, agg, extra, out_dir: Path) -> tuple[Path
           f"golden set `{sha}` · {len(per_query)} queries ({n_ans} answerable) · fetch_k={FETCH_K} · "
           f"unlocated rerank slots={extra['unlocated_rerank_slots']}", "",
           "## Aggregate (answerable queries only)", "",
-          "| metric | vector only | + rerank |", "|---|---|---|"]
+          "| metric | " + " | ".join(PIPES) + " |", "|---|" + "---|" * len(PIPES)]
     for m in ["mrr"] + [f"{x}_at_{k}" for k in KS for x in ("recall", "hit", "ndcg", "precision")]:
-        md.append(f"| {m} | {agg[f'vector_{m}']:.3f} | {agg[f'rerank_{m}']:.3f} |")
-    md += ["", "## recall@5 / hit@5 by query type (rerank)", "", "| type | n | recall@5 | hit@5 |", "|---|---|---|---|"]
-    rc, ht = by_type(per_query, "rerank", "recall_at_5"), by_type(per_query, "rerank", "hit_at_5")
-    md += [f"| {t} | {rc[t][1]} | {rc[t][0]:.2f} | {ht[t][0]:.2f} |" for t in rc]
+        md.append(f"| {m} | " + " | ".join(f"{agg[f'{p}_{m}']:.3f}" for p in PIPES) + " |")
+    for metric in ("recall_at_5", "hit_at_5"):
+        md += ["", f"## {metric} by query type", "", "| type | n | " + " | ".join(PIPES) + " |",
+               "|---|---|" + "---|" * len(PIPES)]
+        tabs = {p: by_type(per_query, p, metric) for p in PIPES}
+        md += [f"| {t} | {tabs['vector'][t][1]} | " + " | ".join(f"{tabs[p][t][0]:.2f}" for p in PIPES) + " |"
+               for t in tabs["vector"]]
     md += ["", "## Top rerank score: answerable vs unanswerable (for the score cutoff)", "",
            "| cutoff | answerable kept | unanswerable kept (false answers) |", "|---|---|---|"]
     md += [f"| >= {c} | {a}/{na} | {u}/{nu} |" for c, a, na, u, nu in cutoff_table(per_query)]
@@ -148,7 +155,7 @@ def log_mlflow(label, sha, agg, report: Path, csv_path: Path) -> None:
     mlflow.set_experiment(mcfg.EXPERIMENT_RAG)
     with mlflow.start_run(run_name=label):
         mlflow.log_params({"chunker_version": label, "fetch_k": FETCH_K, "golden_sha": sha,
-                           "embed_model": "nomic-embed-text-v1.5",
+                           "embed_model": "nomic-embed-text-v1.5", "tsconfig": "simple", "rrf_k": 60,
                            "reranker": "ms-marco-MiniLM-L-6-v2"})
         mlflow.log_metrics({k: round(v, 4) for k, v in agg.items()})
         mlflow.set_tag(mcfg.TAG_STAGE, "development")

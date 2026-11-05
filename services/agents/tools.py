@@ -19,6 +19,7 @@ Stub policy:
 
 import logging
 import os
+import re
 
 import psycopg2
 import psycopg2.extensions
@@ -76,43 +77,114 @@ def _open_db() -> psycopg2.extensions.connection:
 # Shared tool — injected into ALL three agents
 # ---------------------------------------------------------------------------
 
-def retrieve_candidates(
-    query: str, fetch_k: int, source_filter: str | None = None
-) -> list[dict]:
-    """
-    Stage 1: embed the query and run pgvector HNSW search. Returns candidates in
-    cosine-similarity order (best first). Split out from the tool so the eval harness
-    can score vector-only ordering against the re-ranked ordering.
-    """
+_STOPWORDS = frozenset(
+    "a an and are as at be but by can do does for from has have how i if in is it its "
+    "my of on or our so than that the their then there these they this to up was we "
+    "what when where which who why will with you your".split()
+)
+RRF_K = 60  # standard reciprocal-rank-fusion damping constant
+
+
+def _where(source_filter: str | None) -> tuple[str, list]:
+    if source_filter:
+        return "WHERE source_doc LIKE %s", [f"{source_filter}%"]
+    return "", []
+
+
+def _vector_candidates(query: str, fetch_k: int, source_filter: str | None) -> list[dict]:
     # "search_query: " prefix is required by nomic-embed-text-v1.5 at retrieval time;
     # passages were ingested with "search_document: " (asymmetric training convention).
     query_vec = _get_embedder().encode(f"search_query: {query}")
-    where = "WHERE source_doc LIKE %s" if source_filter else ""
-    params = [query_vec]
-    if source_filter:
-        params.append(f"{source_filter}%")
-    params += [query_vec, fetch_k]
+    where, wparams = _where(source_filter)
     conn = _open_db()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT content, source_doc, metadata,
+                SELECT id, content, source_doc, metadata,
                        1 - (embedding <=> %s) AS cosine_similarity
-                FROM document_chunks
-                {where}
+                FROM document_chunks {where}
                 ORDER BY embedding <=> %s
                 LIMIT %s
                 """,
-                params,
+                [query_vec, *wparams, query_vec, fetch_k],
             )
             rows = cur.fetchall()
     finally:
         conn.close()
     return [
-        {"content": c, "source": src, "metadata": md or {}, "cosine": float(cos)}
-        for c, src, md, cos in rows
+        {"id": str(i), "content": c, "source": src, "metadata": md or {}, "cosine": float(cos)}
+        for i, c, src, md, cos in rows
     ]
+
+
+def _lexical_candidates(query: str, fetch_k: int, source_filter: str | None) -> list[dict]:
+    """
+    Keyword branch: OR of the query's non-stopword terms against the 'simple' tsvector.
+    Caveat: ts_rank_cd has no IDF, so rare terms are not weighted above common ones;
+    the fusion + cross-encoder downstream compensate. Revisit with BM25 if the eval says so.
+    """
+    terms = [
+        t for t in dict.fromkeys(re.findall(r"[a-z0-9]+", query.lower()))
+        if t not in _STOPWORDS and (len(t) > 1 or t.isdigit())
+    ]
+    if not terms:
+        return []
+    tsq = " | ".join(terms)
+    where, wparams = _where(source_filter)
+    clause = "content_tsv @@ to_tsquery('simple', %s)"
+    where = f"{where} AND {clause}" if where else f"WHERE {clause}"
+    conn = _open_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, content, source_doc, metadata
+                FROM document_chunks {where}
+                ORDER BY ts_rank_cd(content_tsv, to_tsquery('simple', %s), 32) DESC
+                LIMIT %s
+                """,
+                [*wparams, tsq, tsq, fetch_k],
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [
+        {"id": str(i), "content": c, "source": src, "metadata": md or {}, "cosine": None}
+        for i, c, src, md in rows
+    ]
+
+
+def _rrf(*ranked_lists: list[dict]) -> list[dict]:
+    """Reciprocal rank fusion: score = sum over lists of 1/(RRF_K + rank). No score
+    normalization needed, which is why it suits mixing cosine similarity with ts_rank."""
+    fused: dict[str, dict] = {}
+    for lst in ranked_lists:
+        for rank, c in enumerate(lst, start=1):
+            entry = fused.setdefault(c["id"], {**c, "rrf": 0.0})
+            entry["rrf"] += 1.0 / (RRF_K + rank)
+            if entry.get("cosine") is None and c.get("cosine") is not None:
+                entry["cosine"] = c["cosine"]
+    return sorted(fused.values(), key=lambda c: c["rrf"], reverse=True)
+
+
+def retrieve_candidates(
+    query: str,
+    fetch_k: int,
+    source_filter: str | None = None,
+    mode: str = "vector",
+) -> list[dict]:
+    """
+    Stage 1 candidate generation. mode="vector": pgvector HNSW cosine order.
+    mode="hybrid": vector + keyword branches fused with RRF, truncated to fetch_k.
+    Split out from the tool so the eval harness can score each ordering separately.
+    """
+    vec = _vector_candidates(query, fetch_k, source_filter)
+    if mode == "vector":
+        return vec
+    if mode != "hybrid":
+        raise ValueError(f"unknown retrieval mode: {mode!r}")
+    return _rrf(vec, _lexical_candidates(query, fetch_k, source_filter))[:fetch_k]
 
 
 def rerank(query: str, candidates: list[dict]) -> list[dict]:
