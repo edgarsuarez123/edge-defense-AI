@@ -225,8 +225,16 @@ def search_knowledge_base(
         )
         return []
     return [
-        {"content": c["content"], "source": c["source"], "score": c["score"],
-         "metadata": c["metadata"]}
+        {
+            "content": c["content"],
+            "source": c["source"],
+            "score": c["score"],
+            # Citation fields (None for legacy / fallback-chunked rows without them).
+            "section_path": c["metadata"].get("section_path"),
+            "page_start": c["metadata"].get("page_start"),
+            "page_end": c["metadata"].get("page_end"),
+            "metadata": c["metadata"],
+        }
         for c in rerank(query, candidates)[:top_k]
     ]
 

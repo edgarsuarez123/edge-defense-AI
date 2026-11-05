@@ -19,16 +19,14 @@ Why it lives in services/agents/ and not services/sync/:
     side concerns. services/sync/ handles GovCloud data movement (Week 10). Putting
     ingestion there would create a false dependency on the sync layer.
 
-Chunking strategy (semantic-first, token-capped):
-    1. If the document has military numbered headings (1-1., Chapter 3, Appendix A),
-       split on those boundaries — each section is a semantically coherent unit.
-    2. Otherwise (FAA advisories, spec sheets), split on paragraph breaks, then
-       sentence breaks. This is the RecursiveCharacterTextSplitter equivalent, but
-       implemented directly to avoid the langchain dependency.
-    3. Any section/paragraph that exceeds MAX_TOKENS is further split by a sliding
-       token window with OVERLAP_TOKENS overlap.
-    Sections split by heading patterns stay coherent; the sliding window only fires
-    on oversized sections where no better boundary exists.
+Chunking strategy (chunker_version "toc-v1", see services/agents/chunking.py):
+    1. PDFs with an embedded table of contents are chunked along the TOC: subsections
+       fold into their parent while they fit in MAX_TOKENS, oversized sections are
+       windowed with exact page spans. Every chunk carries section_path + page range.
+    2. Anything else (TXT files, PDFs without a TOC) falls back to paragraph/sentence
+       splitting (no page metadata). Replaces the old numbered-heading regex chunker.
+    The embedded text is prefixed with "<doc> > <section path>" for retrieval; the stored
+    `content` stays clean so agents see (and cite) the original text.
 
 Embedding prefix convention (nomic-embed-text-v1.5):
     Passages ingested with "search_document: <text>" prefix.
@@ -55,6 +53,7 @@ import psycopg2.extensions
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
 
+from services.agents import chunking
 from services.agents.db import connect_sync
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -75,20 +74,8 @@ EMBED_BATCH_SIZE = 64  # chunks per encode() call — balances throughput vs RAM
 _MODEL_LOCAL = Path(__file__).resolve().parents[2] / "models" / "weights" / "qwen2.5-7b-awq"
 TOKENIZER_NAME = str(_MODEL_LOCAL) if _MODEL_LOCAL.exists() else "Qwen/Qwen2.5-7B-Instruct-AWQ"
 
-# Military numbered heading patterns — these are split points for semantic chunking.
-# Covers: "1-1. Purpose", "3-2 Description", "Chapter 3", "Section II",
-#         "Appendix A", "ANNEX B", "paragraph 4-7"
-_MILITARY_HEADING = re.compile(
-    r"(?m)(?=^(?:"
-    r"\d+-\d+[\.\s]"
-    r"|Chapter\s+\d+"
-    r"|Section\s+[A-Z0-9]+"
-    r"|Appendix\s+[A-Z]"
-    r"|ANNEX\s+[A-Z]"
-    r"|paragraph\s+\d+"
-    r"))",
-    re.IGNORECASE | re.MULTILINE,
-)
+CHUNKER_VERSION = "toc-v1"
+MIN_TOC_ENTRIES = 5  # fewer valid bookmarks than this = no usable TOC -> paragraph fallback
 
 
 # ---------------------------------------------------------------------------
@@ -163,25 +150,6 @@ def _cap(text: str) -> list[str]:
     return _sliding_window(text)
 
 
-def _chunk_military(text: str) -> list[str]:
-    """
-    Semantic-first chunking for military manuals.
-    Splits on numbered section headings, then caps each section to MAX_TOKENS.
-
-    Why this ordering:
-        Military FMs are written so each numbered section is self-contained.
-        Splitting on headings keeps related sentences together. The sliding window
-        only fires if a section is unusually long (e.g. a table spanning a full page).
-    """
-    sections = _MILITARY_HEADING.split(text)
-    chunks = []
-    for section in sections:
-        section = section.strip()
-        if section:
-            chunks.extend(_cap(section))
-    return chunks
-
-
 def _chunk_fallback(text: str) -> list[str]:
     """
     Fallback chunker for unstructured documents (FAA advisories, spec sheets).
@@ -218,17 +186,37 @@ def _chunk_fallback(text: str) -> list[str]:
     return [c for c in chunks if c.strip()]
 
 
-def _chunk(text: str, source_doc: str) -> list[str]:
+def _chunk_doc(path: Path) -> list[dict]:
     """
-    Choose chunking strategy based on document structure.
-    Military documents (those with numbered heading patterns) get the semantic
-    splitter. Everything else gets the paragraph/sentence fallback.
+    Return chunk records: {"content", "embed_text", "metadata"} for one document.
+    PDFs with a usable TOC use the structure-aware chunker; everything else falls back
+    to paragraph/sentence splitting (no page metadata).
     """
-    if _MILITARY_HEADING.search(text):
-        logger.info(f"  Military heading chunker → {source_doc}")
-        return _chunk_military(text)
-    logger.info(f"  Paragraph fallback chunker → {source_doc}")
-    return _chunk_fallback(text)
+    source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    base = {"chunker_version": CHUNKER_VERSION, "doc_title": path.stem, "source_hash": source_hash[:16]}
+
+    if path.suffix.lower() == ".pdf":
+        with fitz.open(str(path)) as doc:
+            pages, toc = [p.get_text("text") for p in doc], doc.get_toc()
+        if len(chunking._valid_entries(toc)) >= MIN_TOC_ENTRIES:
+            logger.info(f"  TOC chunker → {path.name}")
+            chunks, stats = chunking.chunk_document(
+                pages, toc, chunking.hf_token_spans(_get_tokenizer()), MAX_TOKENS, OVERLAP_TOKENS)
+            logger.info(f"  headings located by text: {stats['headings_located']}/{stats['entries']}")
+            return [{
+                "content": c.content,
+                "embed_text": f"{path.stem} > {c.section_path}\n{c.content}",
+                "metadata": {**base, "section_path": c.section_path, "section_level": c.section_level,
+                             "page_start": c.page_start, "page_end": c.page_end,
+                             "token_count": c.token_count},
+            } for c in chunks]
+        text = "\n".join(pages)
+    else:
+        text = path.read_text(encoding="utf-8", errors="replace")
+
+    logger.info(f"  Paragraph fallback chunker → {path.name}")
+    return [{"content": c, "embed_text": c, "metadata": {**base, "token_count": _count_tokens(c)}}
+            for c in _chunk_fallback(text)]
 
 
 # ---------------------------------------------------------------------------
@@ -255,9 +243,10 @@ def _connect_db() -> psycopg2.extensions.connection:
 def _upsert_chunks(
     conn: psycopg2.extensions.connection,
     source_doc: str,
-    chunks: list[str],
+    records: list[dict],
     embeddings: list,
     dry_run: bool,
+    rebuild: bool = False,
 ) -> tuple[int, int]:
     """
     Insert chunks into document_chunks. Returns (inserted, skipped).
@@ -269,13 +258,19 @@ def _upsert_chunks(
         idempotent: re-running the script on an already-ingested document is a no-op.
     """
     if dry_run:
-        logger.info(f"  [dry-run] {len(chunks)} chunks for {source_doc} — not writing")
-        return len(chunks), 0
+        logger.info(f"  [dry-run] {len(records)} chunks for {source_doc} — not writing")
+        return len(records), 0
 
     inserted = 0
     skipped = 0
     with conn.cursor() as cur:
-        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+        if rebuild:
+            # Delete + insert share one transaction (committed below): a failure leaves
+            # the old chunks intact rather than a half-empty document.
+            cur.execute("DELETE FROM document_chunks WHERE source_doc = %s", (source_doc,))
+            logger.info(f"  --rebuild: removed {cur.rowcount} existing chunks for {source_doc}")
+        for i, (rec, embedding) in enumerate(zip(records, embeddings)):
+            chunk = rec["content"]
             content_hash = hashlib.sha256(chunk.encode()).hexdigest()
             cur.execute(
                 """
@@ -290,7 +285,7 @@ def _upsert_chunks(
                     chunk,
                     embedding,  # numpy array — pgvector adapter handles serialization
                     content_hash,
-                    json.dumps({"chunk_index": i, "total_chunks": len(chunks)}),
+                    json.dumps({**rec["metadata"], "chunk_index": i, "total_chunks": len(records)}),
                 ),
             )
             if cur.rowcount > 0:
@@ -305,7 +300,7 @@ def _upsert_chunks(
 # Main
 # ---------------------------------------------------------------------------
 
-def ingest(source_dir: str, dry_run: bool = False) -> None:
+def ingest(source_dir: str, dry_run: bool = False, rebuild: bool = False) -> None:
     source_path = Path(source_dir)
     if not source_path.exists():
         logger.error(f"Source directory not found: {source_path}")
@@ -330,29 +325,24 @@ def ingest(source_dir: str, dry_run: bool = False) -> None:
         source_doc = doc_path.name
         logger.info(f"Processing {source_doc}...")
 
-        text = _extract_text(doc_path)
-        if not text.strip():
-            logger.warning(f"  No text extracted from {source_doc} — skipping")
-            continue
-
-        chunks = _chunk(text, source_doc)
-        if not chunks:
+        records = _chunk_doc(doc_path)
+        if not records:
             logger.warning(f"  No chunks produced for {source_doc} — skipping")
             continue
 
-        logger.info(f"  {len(chunks)} chunks")
+        logger.info(f"  {len(records)} chunks")
 
         # Embed in batches with the passage prefix required by nomic-embed-text-v1.5.
         # "search_document: " at ingestion time must pair with "search_query: " at
         # retrieval time — the model was trained on this asymmetric prefix convention.
-        prefixed = [f"search_document: {c}" for c in chunks]
+        prefixed = [f"search_document: {r['embed_text']}" for r in records]
         embeddings = []
         for batch_start in range(0, len(prefixed), EMBED_BATCH_SIZE):
             batch = prefixed[batch_start : batch_start + EMBED_BATCH_SIZE]
             batch_vecs = embedder.encode(batch, show_progress_bar=False)
             embeddings.extend(batch_vecs)
 
-        inserted, skipped = _upsert_chunks(conn, source_doc, chunks, embeddings, dry_run)
+        inserted, skipped = _upsert_chunks(conn, source_doc, records, embeddings, dry_run, rebuild)
         logger.info(f"  Inserted: {inserted} | Skipped (already exists): {skipped}")
         total_inserted += inserted
         total_skipped += skipped
@@ -378,5 +368,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Parse and chunk without writing to the database",
     )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Delete each ingested document's existing chunks first (use after changing "
+             "the chunker; without it, hash dedup would mix old and new chunks)",
+    )
     args = parser.parse_args()
-    ingest(args.source, dry_run=args.dry_run)
+    ingest(args.source, dry_run=args.dry_run, rebuild=args.rebuild)
