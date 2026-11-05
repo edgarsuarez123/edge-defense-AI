@@ -641,7 +641,7 @@ def retrieve(query: str, top_k: int = 5, source_filter: str | None = None) -> li
 
 ```bash
 # Manual trigger when new docs are added to data/docs/
-python -m services.sync.ingest --source data/docs/ --collection manuals
+python -m services.agents.ingest --source data/docs/ [--rebuild]   # location per decision-log 2026-10-21
 
 # Steps:
 # 1. Walk data/docs/, compute SHA-256 hash per file

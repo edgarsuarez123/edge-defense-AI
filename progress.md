@@ -4,6 +4,45 @@ Newest entry first. Each entry: what shipped, what's next, any blockers.
 
 ---
 
+## 2026-11-05 — Week 5 · RAG Retrieval Eval + Structure-Aware Chunking (branch `feat/rag-eval`)
+
+### Done
+- **Fixed `search_knowledge_base`, which could never connect**: `tools.py` passed the `+asyncpg` URL to psycopg2. New shared `services/agents/db.py::connect_sync()` used by ingest, tools and the eval.
+- **Golden retrieval set** `evals/golden/rag_golden.jsonl`: 54 queries (43 answerable, 11 unanswerable; 15 multihop incl. 4 cross-document), written by Claude from the full PDF text, labeled by physical page + graded relevance. Human spot-check of ~10 rows still pending.
+- **Metrics + harness**: `evals/metrics/retrieval_metrics.py` (recall/precision/hit/MRR/nDCG@k by page-span overlap, 7 hand-computed tests), `chunk_locator.py` (maps legacy chunks to pages, 517/517 placed), `rag_retrieval_eval.py` (4 pipelines, per-type tables, MLflow experiment `rag-pipeline`, per-query CSV).
+- **Hybrid retrieval** (migration `0002`: `simple` tsvector + GIN; RRF fusion) behind `mode="hybrid"`, default OFF because it lost the eval.
+- **TOC chunker `toc-v1`** (`services/agents/chunking.py`, 8 tests): chunks follow PDF bookmarks, exact page spans, `section_path` + page metadata, heading-prefixed embeddings, `ingest --rebuild`. Old numbered-heading regex chunker removed. `search_knowledge_base` now returns `section_path`, `page_start`, `page_end`.
+
+### Results (43 answerable queries; fetch pool 30)
+| pipeline | metric | regex-v0 | toc-v1 |
+|---|---|---|---|
+| rerank | hit@5 | 0.721 | **0.791** |
+| rerank | recall@5 | 0.640 | **0.671** |
+| rerank | nDCG@5 | 0.594 | **0.619** |
+| vector only | hit@5 | 0.744 | **0.837** |
+| hybrid | hit@5 | 0.581 | 0.628 |
+| hybrid + rerank | hit@5 | 0.674 | 0.791 |
+
+Weakest slices: multihop (recall@5 0.46), spec-table lookups (`m300-02`, `m300-11`), cross-document cases (`x-01`, `x-04`). Acronym queries: 1.00 with dense retrieval alone.
+
+### Findings worth remembering
+- Hybrid (keyword + RRF) does NOT help here; `ts_rank_cd` has no IDF. Untested: true BM25.
+- Reranker (ms-marco MiniLM) helps only at k=1-3; vector-only hit@5 (0.837) beats rerank (0.791). n=43, so inconclusive, but a stronger reranker is worth testing before locking `top_k=5` + rerank.
+- A rerank-score cutoff is not viable (keeps 26/43 answerable and still passes 7/11 unanswerable at -2).
+- `seed.py` leaves a stray `FM_3-01_test` row in `document_chunks`; not removed (dev data).
+- Env: `.venv-training/` now also has langgraph, langchain-core, pytest. System Python lacks pgvector/psycopg2.
+
+### Next (rest of Week 5)
+- Wire Qwen into the agent nodes (`langchain-openai` -> `http://vllm:8000/v1`), threat analyst first.
+- Optional: stronger reranker + true BM25 experiments through the same harness.
+- TensorRT INT8 quantization of `best.pt`; decision model design (needs a grilling session first).
+- Containerize and verify the FastAPI service.
+
+### Blockers
+None.
+
+---
+
 ## 2026-10-25 — Week 4 · Close-Out: vLLM Verified + RAG Ingested (COMPLETE)
 
 ### Done
