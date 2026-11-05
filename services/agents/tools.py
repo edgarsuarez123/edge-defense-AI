@@ -76,6 +76,58 @@ def _open_db() -> psycopg2.extensions.connection:
 # Shared tool — injected into ALL three agents
 # ---------------------------------------------------------------------------
 
+def retrieve_candidates(
+    query: str, fetch_k: int, source_filter: str | None = None
+) -> list[dict]:
+    """
+    Stage 1: embed the query and run pgvector HNSW search. Returns candidates in
+    cosine-similarity order (best first). Split out from the tool so the eval harness
+    can score vector-only ordering against the re-ranked ordering.
+    """
+    # "search_query: " prefix is required by nomic-embed-text-v1.5 at retrieval time;
+    # passages were ingested with "search_document: " (asymmetric training convention).
+    query_vec = _get_embedder().encode(f"search_query: {query}")
+    where = "WHERE source_doc LIKE %s" if source_filter else ""
+    params = [query_vec]
+    if source_filter:
+        params.append(f"{source_filter}%")
+    params += [query_vec, fetch_k]
+    conn = _open_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT content, source_doc, metadata,
+                       1 - (embedding <=> %s) AS cosine_similarity
+                FROM document_chunks
+                {where}
+                ORDER BY embedding <=> %s
+                LIMIT %s
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [
+        {"content": c, "source": src, "metadata": md or {}, "cosine": float(cos)}
+        for c, src, md, cos in rows
+    ]
+
+
+def rerank(query: str, candidates: list[dict]) -> list[dict]:
+    """
+    Stage 2: cross-encoder scores each (query, passage) pair jointly, catching
+    relevance that embedding cosine misses. Returns candidates sorted by score desc,
+    each with a "score" key added.
+    """
+    if not candidates:
+        return []
+    scores = _get_reranker().predict([(query, c["content"]) for c in candidates])
+    scored = [{**c, "score": float(s)} for c, s in zip(candidates, scores)]
+    return sorted(scored, key=lambda c: c["score"], reverse=True)
+
+
 @tool
 def search_knowledge_base(
     query: str,
@@ -92,73 +144,18 @@ def search_knowledge_base(
         top_k: Maximum number of chunks to return (default 5).
         source_filter: Optional document name prefix to restrict results (e.g. "FM 3-01").
     """
-    # Step 1 — embed the query.
-    # "search_query: " prefix is required by nomic-embed-text-v1.5 at retrieval time.
-    # Passages were ingested with "search_document: " — the asymmetric prefixes are
-    # part of the model's training and omitting them measurably degrades recall.
-    embedder = _get_embedder()
-    query_vec = embedder.encode(f"search_query: {query}")
-
-    # Step 2 — pgvector HNSW search with over-fetch for re-ranking.
-    # We retrieve top_k * 3 candidates so the cross-encoder has enough to work with.
-    # The HNSW index (m=16, ef_construction=64, cosine) was built at migration time.
-    # The <=> operator is cosine distance (lower = more similar). 1 - distance = similarity.
-    fetch_k = top_k * 3
-    conn = _open_db()
-    try:
-        with conn.cursor() as cur:
-            if source_filter:
-                cur.execute(
-                    """
-                    SELECT content, source_doc,
-                           1 - (embedding <=> %s) AS cosine_similarity
-                    FROM document_chunks
-                    WHERE source_doc LIKE %s
-                    ORDER BY embedding <=> %s
-                    LIMIT %s
-                    """,
-                    (query_vec, f"{source_filter}%", query_vec, fetch_k),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT content, source_doc,
-                           1 - (embedding <=> %s) AS cosine_similarity
-                    FROM document_chunks
-                    ORDER BY embedding <=> %s
-                    LIMIT %s
-                    """,
-                    (query_vec, query_vec, fetch_k),
-                )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-
-    if not rows:
+    # Over-fetch 3x so the cross-encoder has enough candidates to reorder.
+    candidates = retrieve_candidates(query, top_k * 3, source_filter)
+    if not candidates:
         logger.warning(
             "search_knowledge_base returned no results. "
             "Run: python -m services.agents.ingest --source data/docs/"
         )
         return []
-
-    # Step 3 — cross-encoder re-ranking.
-    # The HNSW search returns approximate nearest neighbors by embedding similarity.
-    # The cross-encoder scores each (query, passage) pair jointly — it reads both
-    # texts together, so it catches semantic relevance that embedding cosine similarity
-    # misses (e.g. "drone countermeasures" matching a passage about jamming procedures).
-    reranker = _get_reranker()
-    pairs = [(query, row[0]) for row in rows]
-    scores = reranker.predict(pairs)
-
-    # Zip scores back to rows, sort descending, return top_k
-    ranked = sorted(zip(scores, rows), key=lambda x: x[0], reverse=True)
     return [
-        {
-            "content": row[0],
-            "source": row[1],
-            "score": float(score),
-        }
-        for score, row in ranked[:top_k]
+        {"content": c["content"], "source": c["source"], "score": c["score"],
+         "metadata": c["metadata"]}
+        for c in rerank(query, candidates)[:top_k]
     ]
 
 
