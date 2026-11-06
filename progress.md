@@ -30,13 +30,21 @@ Weakest slices: multihop (recall@5 0.46), spec-table lookups (`m300-02`, `m300-1
 - Reranker (ms-marco MiniLM) helps only at k=1-3; vector-only hit@5 (0.837) beats rerank (0.791). n=43, so inconclusive, but a stronger reranker is worth testing before locking `top_k=5` + rerank.
 - A rerank-score cutoff is not viable (keeps 26/43 answerable and still passes 7/11 unanswerable at -2).
 - `seed.py` leaves a stray `FM_3-01_test` row in `document_chunks`; not removed (dev data).
+- **Reranker comparison (done):** mxbai-rerank-base-v1 beats MiniLM clearly (hit@1 0.512 -> 0.698, MRR 0.637 -> 0.772, nDCG@5 0.619 -> 0.722, hit@5 0.791 -> 0.884, recall@10 0.721 -> 0.845) and is the only one that beats dense-only at k=5. bge-reranker-base ~ MiniLM. Cost on CPU per 30 candidates: MiniLM 0.9 s, bge 6.5 s, mxbai 12.5 s (single-query timing). `DEFAULT_RERANKER` NOT changed; GPU-vs-CPU placement is a Week 5 wiring decision.
+- Gotcha: mxbai ships fp16 weights; loaded as fp16 on CPU the eval ran 2h+ without finishing. `_get_reranker` now forces float32; `RERANK_DEVICE=cuda` option for evals (scores are device-independent).
 - Env: `.venv-training/` now also has langgraph, langchain-core, pytest. System Python lacks pgvector/psycopg2.
 
 ### Next (rest of Week 5)
 - Wire Qwen into the agent nodes (`langchain-openai` -> `http://vllm:8000/v1`), threat analyst first.
-- Optional: stronger reranker + true BM25 experiments through the same harness.
+- Decide reranker default (mxbai on GPU beside vLLM vs MiniLM on CPU) and set `top_k` / pool size accordingly.
+- Optional: true BM25 experiment through the same harness.
 - TensorRT INT8 quantization of `best.pt`; decision model design (needs a grilling session first).
 - Containerize and verify the FastAPI service.
+
+### Branch status / open items
+- `feat/rag-eval` pushed, NOT merged (needs explicit go-ahead).
+- Pending from user: spot-check ~10 golden rows (`atp-07`, `atp-12`, `ac-08`, `ac-12`, `ac-16`, `m300-04`, `m300-11`, `x-01`, `x-03`, `x-04`); OK to delete stray `FM_3-01_test` row.
+- Untracked, deliberately uncommitted: `data/docs/*.pdf` (DVC candidates), `evals/golden/parts/` (drafts).
 
 ### Blockers
 None.
