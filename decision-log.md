@@ -801,3 +801,25 @@ Considered dropping results below a cross-encoder score threshold and returning 
 `evals/metrics/rag_retrieval_eval.py` scores four orderings (vector, hybrid, rerank, hybrid_rerank) at k=1,3,5,10 with recall, precision, hit, nDCG, MRR, broken down by query type, and logs to the existing `EXPERIMENT_RAG = "rag-pipeline"` experiment with `chunker_version`, `fetch_k`, `golden_sha` params, plus a per-query CSV artifact. Candidate pool is `fetch_k=30` for all pipelines (production uses `top_k*3=15` at k=5), chosen for a controlled comparison.
 
 *Why:* the architecture's CI gate measured generation (Ragas faithfulness) only; a retrieval regression can hide behind faithful summaries of the wrong passages. Metrics are pure functions with hand-computed unit tests (`evals/metrics/test_retrieval_metrics.py`).
+
+---
+
+**[2026-11-05] Reranker comparison: mxbai-rerank-base-v1 beats MiniLM; adoption pending (default unchanged)**
+Evaluated on toc-v1 chunks, 43 answerable queries, fetch pool 30 (rerank ordering): MiniLM-L-6 (current) vs mixedbread-ai/mxbai-rerank-base-v1 vs BAAI/bge-reranker-base.
+
+| metric | MiniLM-L-6 | mxbai-base | bge-base |
+|---|---|---|---|
+| hit@1 | 0.512 | 0.698 | 0.558 |
+| MRR | 0.637 | 0.772 | 0.657 |
+| nDCG@5 | 0.619 | 0.722 | 0.624 |
+| recall@5 | 0.671 | 0.752 | 0.678 |
+| hit@5 | 0.791 | 0.884 | 0.791 |
+| recall@10 | 0.721 | 0.845 | 0.740 |
+
+mxbai is the only candidate that beats dense-only retrieval at k=5 (hit@5 0.884 vs 0.837); bge is indistinguishable from MiniLM. mxbai's hit@1 gain is about 8 queries out of 43, outside the noise floor.
+
+*Cost:* CPU latency per 30 candidates (8 threads): MiniLM 0.9 s, bge 6.5 s, mxbai 12.5 s. For the production pool (top_k*3 = 15) mxbai is ~6 s on this laptop CPU, slower on Jetson-class hardware. Options: run it on GPU (184M params, <1 GB, fits beside vLLM's 0.75 share), shrink the pool, or keep MiniLM.
+
+*Gotcha found:* mxbai ships fp16 weights; sentence-transformers loaded them as fp16 on CPU, which ran for 2+ hours without finishing the eval. `_get_reranker` now forces float32, and `RERANK_DEVICE` (default cpu) allows GPU for evals. Scores are device-independent; latency numbers above are CPU/float32.
+
+*Status:* `DEFAULT_RERANKER` unchanged (MiniLM). Switching is a latency-vs-quality call for the user. n=43 and one corpus: re-run when the golden set grows.

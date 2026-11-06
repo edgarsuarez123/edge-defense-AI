@@ -1,0 +1,55 @@
+id,type,answerable,top_rerank_score,vector_first_hit_rank,rerank_first_hit_rank,vector_top1,rerank_top1,query
+x-01,multihop,True,0.134,2,2,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,"A Matrice 300 RTK is hovering outside our fence. Could a handheld jammer reach it, and how far can the aircraft stay linked to its operator?"
+x-02,multihop,True,0.093,2,1,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,M300_RTK_User_Manual_EN_v4.0.pdf:16-17,"A contractor says they will fly a Matrice 300 RTK over our base after sundown. What does the FAA expect for night flights, and what lights does the aircraft itself have?"
+x-03,multihop,True,0.162,1,1,AC_107-2A.pdf:32-33,AC_107-2A.pdf:31-32,"How can we tell a compliant civilian drone that is broadcasting an ID from a hostile one, and what are the permission levels for engaging an unknown drone?"
+x-04,multihop,True,0.305,,5,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,atp3-01-81.pdf:11-12,"What jamming or GPS interference methods exist against a drone like the Matrice 300 RTK, and how does that aircraft react if its control link is lost?"
+ac-01,paraphrase,True,0.386,1,8,AC_107-2A.pdf:16-17,AC_107-2A.pdf:70-70,"My drone clipped a parked car and the repair came to about $800. Do I have to tell the FAA, and by when?"
+ac-02,factoid,True,0.283,3,1,AC_107-2A.pdf:30-30,AC_107-2A.pdf:29-29,How high am I allowed to fly my drone when I'm working right next to a tall building?
+ac-03,paraphrase,True,0.442,1,1,AC_107-2A.pdf:24-24,AC_107-2A.pdf:23-24,Can I just use binoculars or my FPV goggles to keep track of the drone instead of looking at it?
+ac-04,paraphrase,True,0.149,4,1,AC_107-2A.pdf:50-50,AC_107-2A.pdf:25-26,Do I need to call anybody before flying near a small airfield that has no control tower?
+ac-05,paraphrase,True,0.964,1,1,AC_107-2A.pdf:39-40,AC_107-2A.pdf:39-40,How often do I have to redo training to keep my remote pilot certificate valid?
+ac-06,paraphrase,True,0.372,,1,AC_107-2A.pdf:46-46,AC_107-2A.pdf:19-20,Can a coworker who isn't certified fly my drone while I stand next to them?
+ac-07,paraphrase,True,0.616,,1,AC_107-2A.pdf:69-69,AC_107-2A.pdf:33-33,"If something goes badly wrong mid-flight, am I allowed to break the flight rules to deal with it, and do I owe the FAA anything afterward?"
+ac-08,acronym,True,0.170,1,1,AC_107-2A.pdf:23-24,AC_107-2A.pdf:23-24,What's the max number of seconds VLOS can be broken before it's a violation?
+ac-09,acronym,True,0.705,1,1,AC_107-2A.pdf:34-35,AC_107-2A.pdf:33-34,Which Part 107 rules can I actually get a CoW for?
+ac-10,acronym,True,0.437,1,1,AC_107-2A.pdf:32-33,AC_107-2A.pdf:32-33,What's a FRIA and when would a pilot with a non-Remote-ID drone use one?
+ac-11,multihop,True,0.149,,,AC_107-2A.pdf:88-89,AC_107-2A.pdf:25-25,I built my own drone from parts and want to fly it at night over a crowded stadium event. What stands in my way?
+ac-12,multihop,True,0.094,1,1,AC_107-2A.pdf:22-22,AC_107-2A.pdf:22-22,I'm launching right at dusk. What do I need on the aircraft and what do I need on me?
+ac-13,multihop,True,0.054,2,1,AC_107-2A.pdf:47-48,AC_107-2A.pdf:59-59,"My 2 lb quadcopter can hit the ground at 28 ft/s. Is that low enough energy to fly over people, and in which category?"
+ac-14,multihop,True,0.722,1,1,AC_107-2A.pdf:80-81,AC_107-2A.pdf:80-81,"Can a Category 2 drone be flown over people after dark, and what do I need to do about lighting?"
+ac-15,unanswerable,False,0.199,,,AC_107-2A.pdf:50-50,AC_107-2A.pdf:50-51,What's the monetary fine for flying a drone commercially without a remote pilot certificate?
+ac-16,unanswerable,False,0.074,,,AC_107-2A.pdf:30-31,AC_107-2A.pdf:78-78,What does California law say about drones photographing people on private property?
+ac-17,unanswerable,False,0.274,,,AC_107-2A.pdf:73-74,AC_107-2A.pdf:74-74,How do the EU's C0 to C4 drone class labels work?
+ac-18,unanswerable,False,0.053,,,M300_RTK_User_Manual_EN_v4.0.pdf:104-105,M300_RTK_User_Manual_EN_v4.0.pdf:24-24,What's the top speed and battery endurance of the Skydio X10?
+atp-01,factoid,True,0.128,1,1,atp3-01-81.pdf:48-48,atp3-01-81.pdf:48-48,"How far does the handheld drone jammer in the example equipment list reach, and does the operator have to keep the drone in sight?"
+atp-02,paraphrase,True,0.589,1,1,atp3-01-81.pdf:32-32,atp3-01-81.pdf:31-32,"When the warning goes out about an incoming drone, what is the first thing a soldier should do?"
+atp-03,paraphrase,True,0.724,2,1,atp3-01-81.pdf:30-31,atp3-01-81.pdf:28-30,"How far above and below the horizon should a lookout search for drones, and how can I eyeball that angle?"
+atp-04,paraphrase,True,0.182,4,6,AC_107-2A.pdf:46-46,atp3-01-81.pdf:35-35,A small tactical drone is crossing in front of my squad; how far ahead of it should we aim?
+atp-05,paraphrase,True,0.189,1,1,atp3-01-81.pdf:36-39,atp3-01-81.pdf:36-39,We found a crashed enemy quadcopter; what do we do before touching it?
+atp-06,paraphrase,True,0.017,,,AC_107-2A.pdf:50-50,AC_107-2A.pdf:102-103,"What are the fire-permission levels for engaging unknown drones, and which one is the most restrictive?"
+atp-07,factoid,True,0.031,7,1,AC_107-2A.pdf:92-92,atp3-01-81.pdf:13-15,Why do base radars have such a hard time picking up cheap hobby-grade quadcopters?
+atp-08,acronym,True,0.936,1,1,atp3-01-81.pdf:16-17,atp3-01-81.pdf:16-17,"ADW red, yellow, white: what does each one mean?"
+atp-09,acronym,True,0.626,1,1,atp3-01-81.pdf:17-17,atp3-01-81.pdf:17-17,"What's a PPL, and who puts one together at brigade?"
+atp-10,acronym,True,0.565,1,1,atp3-01-81.pdf:23-23,atp3-01-81.pdf:23-23,How much gap do I need between a ULCANS net and the vehicle underneath for it to work?
+atp-11,multihop,True,0.069,,4,atp3-01-81.pdf:27-28,atp3-01-81.pdf:27-28,What can a defender exploit to figure out where the person flying a drone is standing?
+atp-12,multihop,True,0.432,1,1,atp3-01-81.pdf:19-19,atp3-01-81.pdf:19-19,"What should the intelligence shop collect about enemy drones when helping a battalion plan protection, and what questions does the threat template answer?"
+atp-13,multihop,True,0.070,4,1,AC_107-2A.pdf:46-46,atp3-01-81.pdf:33-33,"Who decides whether the unit shoots rifles at a drone, and at about what distance is it pointless?"
+atp-14,multihop,True,0.559,1,2,atp3-01-81.pdf:41-41,atp3-01-81.pdf:39-39,"Which parts of an enemy drone system are the most valuable to hit on the ground, and what help can other services give against the biggest drones?"
+atp-15,unanswerable,False,0.231,,,atp3-01-81.pdf:48-48,atp3-01-81.pdf:48-48,What does the Drone Buster cost per unit?
+atp-16,unanswerable,False,0.052,,,AC_107-2A.pdf:45-46,AC_107-2A.pdf:50-50,Which section of the U.S. Code governs who may legally disable a drone over a domestic military installation?
+atp-17,unanswerable,False,0.016,,,atp3-01-81.pdf:11-11,atp3-01-81.pdf:48-48,What is the detection range of the Anduril Sentry tower against Group 1 drones?
+atp-18,unanswerable,False,0.112,,,AC_107-2A.pdf:92-92,AC_107-2A.pdf:92-92,"Which control-link frequencies in GHz do commercial quadcopters use, so I can set up my RF detector?"
+m300-01,paraphrase,True,0.842,1,1,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,How long can the Matrice 300 RTK stay airborne with no payload before the batteries run out?
+m300-02,factoid,True,0.528,2,2,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,M300_RTK_User_Manual_EN_v4.0.pdf:27-28,What wind speed is too strong to fly the Matrice 300 RTK safely?
+m300-03,paraphrase,True,0.868,2,1,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,M300_RTK_User_Manual_EN_v4.0.pdf:38-39,"Can the Matrice 300 RTK fly in the rain, and under what conditions does its water protection stop applying?"
+m300-04,factoid,True,0.779,5,3,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,M300_RTK_User_Manual_EN_v4.0.pdf:34-35,What ambient temperatures can the Matrice 300 RTK safely operate in?
+m300-05,factoid,True,0.129,1,5,M300_RTK_User_Manual_EN_v4.0.pdf:8-9,M300_RTK_User_Manual_EN_v4.0.pdf:41-41,How far away can the operator still receive a live video feed from the Matrice 300 RTK?
+m300-06,paraphrase,True,0.461,3,1,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,M300_RTK_User_Manual_EN_v4.0.pdf:103-104,"How heavy a load can the Matrice 300 RTK carry, and what is the heaviest it can be at liftoff?"
+m300-07,acronym,True,0.880,1,1,M300_RTK_User_Manual_EN_v4.0.pdf:38-38,M300_RTK_User_Manual_EN_v4.0.pdf:38-38,AirSense ADS-B reception radius and which standards it listens to
+m300-08,acronym,True,0.945,2,1,M300_RTK_User_Manual_EN_v4.0.pdf:8-9,M300_RTK_User_Manual_EN_v4.0.pdf:37-37,D-RTK 2 mobile station range FCC vs CE
+m300-09,multihop,True,0.599,3,1,M300_RTK_User_Manual_EN_v4.0.pdf:55-57,M300_RTK_User_Manual_EN_v4.0.pdf:15-16,"What happens if the Matrice 300 RTK loses the controller link in flight, and how can we tell from its lights?"
+m300-10,multihop,True,0.302,2,4,M300_RTK_User_Manual_EN_v4.0.pdf:105-106,M300_RTK_User_Manual_EN_v4.0.pdf:100-101,"We are running Matrice 300 RTK missions at a site that drops to minus 15 C at night. What should we do about the batteries, and is that temperature even within what the aircraft is rated for?"
+m300-11,multihop,True,0.156,1,6,M300_RTK_User_Manual_EN_v4.0.pdf:105-106,M300_RTK_User_Manual_EN_v4.0.pdf:9-11,"With the stock batteries installed, roughly how much payload can we add to the Matrice 300 RTK and still operate at 5,000 m above sea level?"
+m300-12,unanswerable,False,0.720,,,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,M300_RTK_User_Manual_EN_v4.0.pdf:16-17,Does the Matrice 300 RTK broadcast a DroneID signal that a base could use to identify the aircraft and locate its pilot?
+m300-13,unanswerable,False,0.175,,,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,M300_RTK_User_Manual_EN_v4.0.pdf:104-105,How loud is the Matrice 300 RTK in decibels when flying at 100 meters?
+m300-14,unanswerable,False,0.599,,,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,M300_RTK_User_Manual_EN_v4.0.pdf:7-7,How does the Matrice 300 RTK's maximum flight time compare with the Matrice 350 RTK?

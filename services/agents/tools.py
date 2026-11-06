@@ -39,7 +39,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _embedder: SentenceTransformer | None = None
-_reranker: CrossEncoder | None = None
+_rerankers: dict[str, CrossEncoder] = {}
+# Overridable so the eval can compare cross-encoders without code edits.
+DEFAULT_RERANKER = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
 def _get_embedder() -> SentenceTransformer:
@@ -50,12 +52,14 @@ def _get_embedder() -> SentenceTransformer:
     return _embedder
 
 
-def _get_reranker() -> CrossEncoder:
-    global _reranker
-    if _reranker is None:
-        logger.info("Loading cross-encoder/ms-marco-MiniLM-L-6-v2...")
-        _reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-    return _reranker
+def _get_reranker(name: str | None = None) -> CrossEncoder:
+    name = name or DEFAULT_RERANKER
+    if name not in _rerankers:
+        logger.info(f"Loading cross-encoder {name} on CPU...")
+        # float32 is forced: some checkpoints (mxbai) ship fp16 and fp16 on CPU is ~100x slower.
+        _rerankers[name] = CrossEncoder(name, max_length=512, device=os.getenv("RERANK_DEVICE", "cpu"),
+                                        model_kwargs={"torch_dtype": "float32"})
+    return _rerankers[name]
 
 
 def _open_db() -> psycopg2.extensions.connection:
@@ -187,7 +191,7 @@ def retrieve_candidates(
     return _rrf(vec, _lexical_candidates(query, fetch_k, source_filter))[:fetch_k]
 
 
-def rerank(query: str, candidates: list[dict]) -> list[dict]:
+def rerank(query: str, candidates: list[dict], model: str | None = None) -> list[dict]:
     """
     Stage 2: cross-encoder scores each (query, passage) pair jointly, catching
     relevance that embedding cosine misses. Returns candidates sorted by score desc,
@@ -195,7 +199,7 @@ def rerank(query: str, candidates: list[dict]) -> list[dict]:
     """
     if not candidates:
         return []
-    scores = _get_reranker().predict([(query, c["content"]) for c in candidates])
+    scores = _get_reranker(model).predict([(query, c["content"]) for c in candidates])
     scored = [{**c, "score": float(s)} for c, s in zip(candidates, scores)]
     return sorted(scored, key=lambda c: c["score"], reverse=True)
 

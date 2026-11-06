@@ -66,15 +66,15 @@ def score(retrieved: list[Span], gold: list[Span]) -> dict:
     return out
 
 
-def evaluate(rows: list[dict]) -> tuple[list[dict], dict]:
+def evaluate(rows: list[dict], reranker: str | None = None) -> tuple[list[dict], dict]:
     cache: dict = {}
     per_query, unlocated = [], 0
     for r in rows:
         cands = retrieve_candidates(r["query"], FETCH_K)
         hyb = retrieve_candidates(r["query"], FETCH_K, mode="hybrid")
-        ranked = rerank(r["query"], cands)
+        ranked = rerank(r["query"], cands, reranker)
         pipes = {"vector": cands[:max(KS)], "hybrid": hyb[:max(KS)],
-                 "rerank": ranked[:max(KS)], "hybrid_rerank": rerank(r["query"], hyb)[:max(KS)]}
+                 "rerank": ranked[:max(KS)], "hybrid_rerank": rerank(r["query"], hyb, reranker)[:max(KS)]}
         gold = [Span(g["doc"], g["page_start"], g["page_end"], g["grade"]) for g in r["relevant"]]
         rec = {"id": r["id"], "type": r["type"], "answerable": r["answerable"], "query": r["query"],
                "top_rerank_score": ranked[0]["score"] if ranked else None}
@@ -149,14 +149,14 @@ def write_report(label, sha, per_query, agg, extra, out_dir: Path) -> tuple[Path
     return report, csv_path
 
 
-def log_mlflow(label, sha, agg, report: Path, csv_path: Path) -> None:
+def log_mlflow(label, sha, agg, report: Path, csv_path: Path, reranker: str) -> None:
     import mlflow
     mlflow.set_tracking_uri(mcfg.TRACKING_URI)
     mlflow.set_experiment(mcfg.EXPERIMENT_RAG)
     with mlflow.start_run(run_name=label):
         mlflow.log_params({"chunker_version": label, "fetch_k": FETCH_K, "golden_sha": sha,
                            "embed_model": "nomic-embed-text-v1.5", "tsconfig": "simple", "rrf_k": 60,
-                           "reranker": "ms-marco-MiniLM-L-6-v2"})
+                           "reranker": reranker})
         mlflow.log_metrics({k: round(v, 4) for k, v in agg.items()})
         mlflow.set_tag(mcfg.TAG_STAGE, "development")
         mlflow.log_artifact(str(report))
@@ -168,16 +168,19 @@ if __name__ == "__main__":
     ap.add_argument("--label", required=True, help="chunker/config version, e.g. baseline-regex-v0")
     ap.add_argument("--golden", default=str(ROOT / "evals" / "golden" / "rag_golden.jsonl"))
     ap.add_argument("--no-mlflow", action="store_true")
+    ap.add_argument("--reranker", default=None, help="cross-encoder model name (default: tools.DEFAULT_RERANKER)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO)
     rows, sha = load_golden(Path(args.golden))
-    per_query, extra = evaluate(rows)
+    from services.agents.tools import DEFAULT_RERANKER
+    reranker = args.reranker or DEFAULT_RERANKER
+    per_query, extra = evaluate(rows, reranker)
     agg = aggregate(per_query)
     report, csv_path = write_report(args.label, sha, per_query, agg, extra, ROOT / "evals" / "reports")
     print(report.read_text(encoding="utf-8"))
     if not args.no_mlflow:
         try:
-            log_mlflow(args.label, sha, agg, report, csv_path)
+            log_mlflow(args.label, sha, agg, report, csv_path, reranker)
             print(f"MLflow: logged to {mcfg.TRACKING_URI} experiment '{mcfg.EXPERIMENT_RAG}'")
         except Exception as e:  # report files are the source of truth; MLflow is best-effort
             print(f"MLflow logging FAILED ({type(e).__name__}: {e}) — report/CSV were still written")
