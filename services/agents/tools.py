@@ -19,12 +19,14 @@ Stub policy:
 
 import logging
 import os
+import re
 
 import psycopg2
 import psycopg2.extensions
 from langchain_core.tools import tool
-from pgvector.psycopg2 import register_vector
 from sentence_transformers import CrossEncoder, SentenceTransformer
+
+from services.agents.db import connect_sync
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +39,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _embedder: SentenceTransformer | None = None
-_reranker: CrossEncoder | None = None
+_rerankers: dict[str, CrossEncoder] = {}
+# Overridable so the eval can compare cross-encoders without code edits.
+DEFAULT_RERANKER = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
 def _get_embedder() -> SentenceTransformer:
@@ -48,12 +52,14 @@ def _get_embedder() -> SentenceTransformer:
     return _embedder
 
 
-def _get_reranker() -> CrossEncoder:
-    global _reranker
-    if _reranker is None:
-        logger.info("Loading cross-encoder/ms-marco-MiniLM-L-6-v2...")
-        _reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-    return _reranker
+def _get_reranker(name: str | None = None) -> CrossEncoder:
+    name = name or DEFAULT_RERANKER
+    if name not in _rerankers:
+        logger.info(f"Loading cross-encoder {name} on CPU...")
+        # float32 is forced: some checkpoints (mxbai) ship fp16 and fp16 on CPU is ~100x slower.
+        _rerankers[name] = CrossEncoder(name, max_length=512, device=os.getenv("RERANK_DEVICE", "cpu"),
+                                        model_kwargs={"torch_dtype": "float32"})
+    return _rerankers[name]
 
 
 def _open_db() -> psycopg2.extensions.connection:
@@ -68,23 +74,135 @@ def _open_db() -> psycopg2.extensions.connection:
         A pool can be added in Week 6 when the agents service is containerized and
         connection count becomes a concern.
     """
-    if url := os.getenv("DATABASE_URL"):
-        conn = psycopg2.connect(url)
-    else:
-        conn = psycopg2.connect(
-            host=os.getenv("POSTGRES_HOST", "localhost"),
-            port=int(os.getenv("POSTGRES_PORT", "5433")),
-            user=os.getenv("POSTGRES_USER", "edge"),
-            password=os.getenv("POSTGRES_PASSWORD", "edge"),
-            dbname=os.getenv("POSTGRES_DB", "edge"),
-        )
-    register_vector(conn)
-    return conn
+    return connect_sync()
 
 
 # ---------------------------------------------------------------------------
 # Shared tool — injected into ALL three agents
 # ---------------------------------------------------------------------------
+
+_STOPWORDS = frozenset(
+    "a an and are as at be but by can do does for from has have how i if in is it its "
+    "my of on or our so than that the their then there these they this to up was we "
+    "what when where which who why will with you your".split()
+)
+RRF_K = 60  # standard reciprocal-rank-fusion damping constant
+
+
+def _where(source_filter: str | None) -> tuple[str, list]:
+    if source_filter:
+        return "WHERE source_doc LIKE %s", [f"{source_filter}%"]
+    return "", []
+
+
+def _vector_candidates(query: str, fetch_k: int, source_filter: str | None) -> list[dict]:
+    # "search_query: " prefix is required by nomic-embed-text-v1.5 at retrieval time;
+    # passages were ingested with "search_document: " (asymmetric training convention).
+    query_vec = _get_embedder().encode(f"search_query: {query}")
+    where, wparams = _where(source_filter)
+    conn = _open_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, content, source_doc, metadata,
+                       1 - (embedding <=> %s) AS cosine_similarity
+                FROM document_chunks {where}
+                ORDER BY embedding <=> %s
+                LIMIT %s
+                """,
+                [query_vec, *wparams, query_vec, fetch_k],
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [
+        {"id": str(i), "content": c, "source": src, "metadata": md or {}, "cosine": float(cos)}
+        for i, c, src, md, cos in rows
+    ]
+
+
+def _lexical_candidates(query: str, fetch_k: int, source_filter: str | None) -> list[dict]:
+    """
+    Keyword branch: OR of the query's non-stopword terms against the 'simple' tsvector.
+    Caveat: ts_rank_cd has no IDF, so rare terms are not weighted above common ones;
+    the fusion + cross-encoder downstream compensate. Revisit with BM25 if the eval says so.
+    """
+    terms = [
+        t for t in dict.fromkeys(re.findall(r"[a-z0-9]+", query.lower()))
+        if t not in _STOPWORDS and (len(t) > 1 or t.isdigit())
+    ]
+    if not terms:
+        return []
+    tsq = " | ".join(terms)
+    where, wparams = _where(source_filter)
+    clause = "content_tsv @@ to_tsquery('simple', %s)"
+    where = f"{where} AND {clause}" if where else f"WHERE {clause}"
+    conn = _open_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, content, source_doc, metadata
+                FROM document_chunks {where}
+                ORDER BY ts_rank_cd(content_tsv, to_tsquery('simple', %s), 32) DESC
+                LIMIT %s
+                """,
+                [*wparams, tsq, tsq, fetch_k],
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [
+        {"id": str(i), "content": c, "source": src, "metadata": md or {}, "cosine": None}
+        for i, c, src, md in rows
+    ]
+
+
+def _rrf(*ranked_lists: list[dict]) -> list[dict]:
+    """Reciprocal rank fusion: score = sum over lists of 1/(RRF_K + rank). No score
+    normalization needed, which is why it suits mixing cosine similarity with ts_rank."""
+    fused: dict[str, dict] = {}
+    for lst in ranked_lists:
+        for rank, c in enumerate(lst, start=1):
+            entry = fused.setdefault(c["id"], {**c, "rrf": 0.0})
+            entry["rrf"] += 1.0 / (RRF_K + rank)
+            if entry.get("cosine") is None and c.get("cosine") is not None:
+                entry["cosine"] = c["cosine"]
+    return sorted(fused.values(), key=lambda c: c["rrf"], reverse=True)
+
+
+def retrieve_candidates(
+    query: str,
+    fetch_k: int,
+    source_filter: str | None = None,
+    mode: str = "vector",
+) -> list[dict]:
+    """
+    Stage 1 candidate generation. mode="vector": pgvector HNSW cosine order.
+    mode="hybrid": vector + keyword branches fused with RRF, truncated to fetch_k.
+    Split out from the tool so the eval harness can score each ordering separately.
+    """
+    vec = _vector_candidates(query, fetch_k, source_filter)
+    if mode == "vector":
+        return vec
+    if mode != "hybrid":
+        raise ValueError(f"unknown retrieval mode: {mode!r}")
+    return _rrf(vec, _lexical_candidates(query, fetch_k, source_filter))[:fetch_k]
+
+
+def rerank(query: str, candidates: list[dict], model: str | None = None) -> list[dict]:
+    """
+    Stage 2: cross-encoder scores each (query, passage) pair jointly, catching
+    relevance that embedding cosine misses. Returns candidates sorted by score desc,
+    each with a "score" key added.
+    """
+    if not candidates:
+        return []
+    scores = _get_reranker(model).predict([(query, c["content"]) for c in candidates])
+    scored = [{**c, "score": float(s)} for c, s in zip(candidates, scores)]
+    return sorted(scored, key=lambda c: c["score"], reverse=True)
+
 
 @tool
 def search_knowledge_base(
@@ -102,73 +220,26 @@ def search_knowledge_base(
         top_k: Maximum number of chunks to return (default 5).
         source_filter: Optional document name prefix to restrict results (e.g. "FM 3-01").
     """
-    # Step 1 — embed the query.
-    # "search_query: " prefix is required by nomic-embed-text-v1.5 at retrieval time.
-    # Passages were ingested with "search_document: " — the asymmetric prefixes are
-    # part of the model's training and omitting them measurably degrades recall.
-    embedder = _get_embedder()
-    query_vec = embedder.encode(f"search_query: {query}")
-
-    # Step 2 — pgvector HNSW search with over-fetch for re-ranking.
-    # We retrieve top_k * 3 candidates so the cross-encoder has enough to work with.
-    # The HNSW index (m=16, ef_construction=64, cosine) was built at migration time.
-    # The <=> operator is cosine distance (lower = more similar). 1 - distance = similarity.
-    fetch_k = top_k * 3
-    conn = _open_db()
-    try:
-        with conn.cursor() as cur:
-            if source_filter:
-                cur.execute(
-                    """
-                    SELECT content, source_doc,
-                           1 - (embedding <=> %s) AS cosine_similarity
-                    FROM document_chunks
-                    WHERE source_doc LIKE %s
-                    ORDER BY embedding <=> %s
-                    LIMIT %s
-                    """,
-                    (query_vec, f"{source_filter}%", query_vec, fetch_k),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT content, source_doc,
-                           1 - (embedding <=> %s) AS cosine_similarity
-                    FROM document_chunks
-                    ORDER BY embedding <=> %s
-                    LIMIT %s
-                    """,
-                    (query_vec, query_vec, fetch_k),
-                )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-
-    if not rows:
+    # Over-fetch 3x so the cross-encoder has enough candidates to reorder.
+    candidates = retrieve_candidates(query, top_k * 3, source_filter)
+    if not candidates:
         logger.warning(
             "search_knowledge_base returned no results. "
             "Run: python -m services.agents.ingest --source data/docs/"
         )
         return []
-
-    # Step 3 — cross-encoder re-ranking.
-    # The HNSW search returns approximate nearest neighbors by embedding similarity.
-    # The cross-encoder scores each (query, passage) pair jointly — it reads both
-    # texts together, so it catches semantic relevance that embedding cosine similarity
-    # misses (e.g. "drone countermeasures" matching a passage about jamming procedures).
-    reranker = _get_reranker()
-    pairs = [(query, row[0]) for row in rows]
-    scores = reranker.predict(pairs)
-
-    # Zip scores back to rows, sort descending, return top_k
-    ranked = sorted(zip(scores, rows), key=lambda x: x[0], reverse=True)
     return [
         {
-            "content": row[0],
-            "source": row[1],
-            "score": float(score),
+            "content": c["content"],
+            "source": c["source"],
+            "score": c["score"],
+            # Citation fields (None for legacy / fallback-chunked rows without them).
+            "section_path": c["metadata"].get("section_path"),
+            "page_start": c["metadata"].get("page_start"),
+            "page_end": c["metadata"].get("page_end"),
+            "metadata": c["metadata"],
         }
-        for score, row in ranked[:top_k]
+        for c in rerank(query, candidates)[:top_k]
     ]
 
 

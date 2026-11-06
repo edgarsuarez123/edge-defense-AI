@@ -722,3 +722,104 @@ The cross-encoder re-ranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`) is wired in
 *Why now:* The re-ranker is ~20 lines. Including it from the start means retrieval quality is correct from first use. Without the re-ranker, HNSW returns approximate nearest neighbors by embedding cosine similarity — good but not optimal. The cross-encoder reads query + passage jointly and catches semantic relevance that cosine similarity misses (e.g. "counter-UAS jamming" matching a passage about EW procedures). Testing with degraded retrieval quality in Week 4 and fixing it in Week 5 would make Week 4 test results misleading.
 
 *Tradeoff:* adds ~30ms per search call (re-ranking 15 candidates). Acceptable for an operator-facing agent system where total latency budget is seconds not milliseconds.
+
+---
+
+## RAG Evaluation & Retrieval (Week 5)
+
+---
+
+**[2026-11-05] Golden retrieval set: labeled by (doc, physical page range), not chunk ID**
+`evals/golden/rag_golden.jsonl` holds 54 queries (43 answerable, 11 unanswerable) labeled with `{doc, page_start, page_end, grade}`, where pages are physical 1-based PDF pages and grade is 2 (direct answer) or 1 (supporting). A retrieved chunk is relevant if its page span overlaps a gold span in the same document.
+
+*Why:* rechunking changes every chunk ID. An ID-labeled set would be invalid after every chunker change, which defeats the purpose of a before/after eval. Page labels are chunker-independent. Legacy chunks without page metadata are mapped to pages by `evals/metrics/chunk_locator.py` (text match against pymupdf page text).
+
+*Authoring:* queries were written by Claude from the full PDF text (not by the served Qwen model, to avoid grading the pipeline with its own LLM). Mix: 14 paraphrase, 6 factoid, 8 acronym, 15 multihop (4 cross-document), 11 unanswerable. Every unanswerable topic was keyword-checked absent from all three documents.
+
+*Known limits:* (1) an LLM writing questions from text tends to echo its wording and inflate recall; queries were phrased operator-style to counter this, but a human spot-check of ~10 rows is still pending. (2) n=43 answerable: one query moves recall@5 by ~2 points, so differences under ~5 points are noise. (3) page-overlap scoring is slightly generous to chunkers that produce wide page spans.
+
+*Alternatives considered:* chunk-ID qrels (invalidated by rechunking). LLM-drafted by Qwen (circular). Hand-written by the user (higher realism, hours of work; the spot-check partly covers this).
+
+---
+
+**[2026-11-05] Chunker toc-v1: TOC-driven structure-aware chunking (supersedes 2026-10-21 "Chunking: hybrid (military heading regex + paragraph fallback)")**
+PDFs with an embedded table of contents are chunked along their bookmarks (`services/agents/chunking.py`): each chunk starts at a section and absorbs its deeper subsections while the total fits in 512 tokens; sibling or higher headings always start a new chunk; a single oversized section is windowed (50-token overlap) with each window's page span computed exactly from token character offsets; chunks under 64 tokens merge into a contiguous neighbour. Each chunk stores `section_path`, `section_level`, `page_start`, `page_end`, `token_count`, `doc_title`, `source_hash`, `chunker_version` in the existing JSONB `metadata` (no migration). Docs without a usable TOC (<5 valid bookmarks) and TXT files use the paragraph/sentence fallback, which has no page metadata.
+
+*Why replace the regex chunker:* it ran a numbered-heading regex over flattened text, so the unit it produced was the individual numbered paragraph ("3-3.", "3-51."), not a section; it chose one strategy per document; it had no minimum size (heading-only stubs); and it stored no page or section, so citations could only name a file.
+
+*Measured (rerank pipeline, 43 answerable queries, regex-v0 -> toc-v1):* hit@5 0.721 -> 0.791, recall@5 0.640 -> 0.671, nDCG@5 0.594 -> 0.619, MRR 0.631 -> 0.637. Vector-only hit@5 0.744 -> 0.837. Directionally positive but within a few queries of the noise floor; the rule was "ship if metrics improve or hold". Caveat: larger chunks overlap more pages, which flatters page-overlap metrics somewhat.
+
+*Source-specific handling:* AC 107-2A carries a duplicate bookmark tree pointing at page -1 (dropped) and 941 paragraph-level entries whose titles are body text (shortened to "N.N Heading"; deep levels fold into the numbered X.Y parent). ATP 3-01.81 has a clean 6-level hierarchy. The M300 manual is flat (8 chapters, 59 sections spanning 1-6 pages), so windowing with exact page spans matters there.
+
+*Tradeoffs / not done:* TOC entries are page-granular, so headings are located by text search at a line start (102/102 ATP, 457/470 AC, 64/67 M300 found; the rest fall back to the page start). Running headers/footers stay in the text. Font-size/bold heading detection for TOC-less PDFs was deferred: all three corpus PDFs have TOCs, so it is YAGNI until a TOC-less document is ingested.
+
+*Alternatives considered:* parent-child (small-to-big) retrieval (candidate `toc-v2`, only if the eval shows section chunks embed poorly); fixed-size windows (breaks section coherence); `get_text("dict")` font-based headings (deferred above).
+
+---
+
+**[2026-11-05] Embedded text carries a "<doc> > <section path>" prefix; stored content stays clean**
+The text sent to nomic-embed is `search_document: <doc> > <section path>\n<content>`, while `document_chunks.content` stores only the original text.
+
+*Why:* the breadcrumb disambiguates sections whose own text is generic ("Overview", "Track") and helps keep identically-worded passages from different documents apart. Agents see and cite the clean text, and prompt-injection isolation is unaffected.
+
+*Tradeoff:* changing the prefix format requires re-embedding everything (`ingest --rebuild`). Easy to reverse, not free.
+
+---
+
+**[2026-11-05] Hybrid retrieval (keyword + RRF) built behind `mode="hybrid"`, default OFF - it lost the eval**
+Migration `0002_chunk_fulltext.py` adds `content_tsv` (generated `tsvector`, `simple` config: no stemming, no stopword removal) with a GIN index. `retrieve_candidates(mode="hybrid")` fuses the vector list and an OR-of-terms keyword list by reciprocal rank fusion (k=60). Default stays `mode="vector"`.
+
+*Why built:* the original plan and architecture specify dense retrieval + re-ranker only; hybrid was an unlogged idea raised during review (acronyms, part numbers, spec tables).
+
+*Measured:* on regex-v0 chunks hybrid hit@5 0.581 vs vector 0.744; on toc-v1 chunks 0.628 vs 0.837. hybrid+rerank is at best equal to rerank (hit@5 0.791 vs 0.791), at worst below. The hypothesis that acronym queries need keyword search was false: acronym queries were already at 1.00 recall@5 with dense retrieval alone.
+
+*Likely cause:* Postgres `ts_rank_cd` has no inverse-document-frequency weighting, so common query terms count as much as rare ones. A real BM25 could behave differently; that is untested.
+
+*Status:* kept as an opt-in code path so the experiment is reproducible. Not enabled for agents. Revisit with true BM25 only if spec-table / multi-hop misses (`m300-02`, `m300-11`, `x-01`, `x-04`) justify it.
+
+*Alternatives considered:* in-process `rank_bm25` index (real IDF, but lives outside the DB and must be rebuilt after each ingest); ParadeDB `pg_search` (new extension to justify on an edge node).
+
+---
+
+**[2026-11-05] No reranker score cutoff in search_knowledge_base**
+Considered dropping results below a cross-encoder score threshold and returning fewer than k.
+
+*Why not:* the cross-encoder's top score does not separate answerable from unanswerable queries on this corpus. On toc-v1, a cutoff of -2 keeps 26/43 answerable queries and still lets 7/11 unanswerable through; stricter cutoffs discard real answers faster than bad ones. `top_k` remains the only limiter.
+
+*Open finding:* with toc-v1, vector-only hit@5 (0.837) is above rerank hit@5 (0.791) and vector recall@10 (0.775) above rerank (0.721); rerank only wins at k=1-3 (nDCG@1 0.543 vs 0.496). With n=43 this is two to four queries, so not conclusive. The generic ms-marco MiniLM cross-encoder may be a poor fit for military/spec text. Candidate follow-up: evaluate a stronger reranker (CPU) before the Week 5 agent wiring locks `top_k=5` plus rerank.
+
+---
+
+**[2026-11-05] Shared sync DB helper: services/agents/db.py**
+`connect_sync()` strips SQLAlchemy `+driver` suffixes, prefers `DATABASE_SYNC_URL`, and registers the pgvector adapter. Used by `ingest.py`, `tools.py`, and the eval harness.
+
+*Why:* `tools.py` had its own connection code that passed `DATABASE_URL` (`postgresql+asyncpg://`) straight to psycopg2, so `search_knowledge_base` could never connect; only `ingest.py` had the fix. One shared function prevents the copies drifting again.
+
+---
+
+**[2026-11-05] Retrieval eval harness and MLflow experiment rag-pipeline**
+`evals/metrics/rag_retrieval_eval.py` scores four orderings (vector, hybrid, rerank, hybrid_rerank) at k=1,3,5,10 with recall, precision, hit, nDCG, MRR, broken down by query type, and logs to the existing `EXPERIMENT_RAG = "rag-pipeline"` experiment with `chunker_version`, `fetch_k`, `golden_sha` params, plus a per-query CSV artifact. Candidate pool is `fetch_k=30` for all pipelines (production uses `top_k*3=15` at k=5), chosen for a controlled comparison.
+
+*Why:* the architecture's CI gate measured generation (Ragas faithfulness) only; a retrieval regression can hide behind faithful summaries of the wrong passages. Metrics are pure functions with hand-computed unit tests (`evals/metrics/test_retrieval_metrics.py`).
+
+---
+
+**[2026-11-05] Reranker comparison: mxbai-rerank-base-v1 beats MiniLM; adoption pending (default unchanged)**
+Evaluated on toc-v1 chunks, 43 answerable queries, fetch pool 30 (rerank ordering): MiniLM-L-6 (current) vs mixedbread-ai/mxbai-rerank-base-v1 vs BAAI/bge-reranker-base.
+
+| metric | MiniLM-L-6 | mxbai-base | bge-base |
+|---|---|---|---|
+| hit@1 | 0.512 | 0.698 | 0.558 |
+| MRR | 0.637 | 0.772 | 0.657 |
+| nDCG@5 | 0.619 | 0.722 | 0.624 |
+| recall@5 | 0.671 | 0.752 | 0.678 |
+| hit@5 | 0.791 | 0.884 | 0.791 |
+| recall@10 | 0.721 | 0.845 | 0.740 |
+
+mxbai is the only candidate that beats dense-only retrieval at k=5 (hit@5 0.884 vs 0.837); bge is indistinguishable from MiniLM. mxbai's hit@1 gain is about 8 queries out of 43, outside the noise floor.
+
+*Cost:* CPU latency per 30 candidates (8 threads): MiniLM 0.9 s, bge 6.5 s, mxbai 12.5 s. For the production pool (top_k*3 = 15) mxbai is ~6 s on this laptop CPU, slower on Jetson-class hardware. Options: run it on GPU (184M params, <1 GB, fits beside vLLM's 0.75 share), shrink the pool, or keep MiniLM.
+
+*Gotcha found:* mxbai ships fp16 weights; sentence-transformers loaded them as fp16 on CPU, which ran for 2+ hours without finishing the eval. `_get_reranker` now forces float32, and `RERANK_DEVICE` (default cpu) allows GPU for evals. Scores are device-independent; latency numbers above are CPU/float32.
+
+*Status:* `DEFAULT_RERANKER` unchanged (MiniLM). Switching is a latency-vs-quality call for the user. n=43 and one corpus: re-run when the golden set grows.
